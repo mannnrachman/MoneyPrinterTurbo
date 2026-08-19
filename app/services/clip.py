@@ -122,6 +122,54 @@ def _build_windows(segments: list[dict], target_duration: float) -> list[dict]:
     return windows
 
 
+def _expand_windows_to_count(
+    segments: list[dict],
+    windows: list[dict],
+    target_duration: float,
+    clip_count: int,
+) -> list[dict]:
+    """Add overlapping windows when the source is shorter than count*duration.
+
+    Windows are placed on a sliding stride and snapped to sentence boundaries
+    so the requested clip count is actually produced for short sources.
+    """
+    if len(windows) >= clip_count or len(segments) < 2:
+        return windows
+    first_start = float(segments[0].get("start_time", 0))
+    total_end = max(float(s.get("end_time", 0)) for s in segments)
+    span = total_end - first_start
+    if span <= target_duration * 0.5:
+        return windows
+
+    stride = (span - target_duration) / max(1, clip_count - 1)
+    start_times = [float(s.get("start_time", 0)) for s in segments]
+    extra = []
+    for i in range(clip_count):
+        anchor = first_start + i * stride
+        # nearest sentence start (snap forward for a clean intro)
+        start_idx = min(
+            range(len(start_times)),
+            key=lambda j: abs(start_times[j] - anchor),
+        )
+        start = start_times[start_idx]
+        end = start + target_duration
+        chosen = []
+        for seg in segments[start_idx:]:
+            seg_end = float(seg.get("end_time", 0))
+            chosen.append(seg)
+            if seg_end >= end:
+                break
+        if chosen:
+            extra.append(
+                _make_window(
+                    chosen,
+                    start,
+                    max(float(s.get("end_time", 0)) for s in chosen),
+                )
+            )
+    return extra[:clip_count]
+
+
 def _make_window(segments: list[dict], start: float, end: float) -> dict:
     return {
         "start": start,
@@ -412,7 +460,7 @@ def generate_clips(
         _extract_audio(video_path, audio_path)
         sm.state.update_task(task_id, progress=20, **task_metadata)
 
-        segments = subtitle.transcribe_segments(audio_path)
+        segments = subtitle.transcribe_segments(audio_path, use_vad=False)
         if segments is None:
             return tm._mark_task_failed(
                 task_id,
@@ -430,6 +478,10 @@ def generate_clips(
         sm.state.update_task(task_id, progress=40, **task_metadata)
 
         windows = _build_windows(segments, duration)
+        if len(windows) < count:
+            windows = _expand_windows_to_count(
+                segments, windows, duration, count
+            )
         if not windows:
             return tm._mark_task_failed(
                 task_id,

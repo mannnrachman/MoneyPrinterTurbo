@@ -62,13 +62,16 @@ def _load_whisper_model():
     return model
 
 
-def transcribe_segments(audio_file):
+def transcribe_segments(audio_file, use_vad: bool = True):
     """
     Transcribe an audio file into sentence segments with timestamps.
 
     Returns a list of ``{"msg", "start_time", "end_time"}`` dicts, or ``None``
     when whisper is unavailable or the model fails to load. Word-level
     timestamps from whisper are collapsed onto sentence boundaries.
+
+    ``use_vad`` skips the silence filter; music/sung content is frequently
+    dropped as "non-speech" by the default VAD, so clip jobs pass False.
     """
     model = _load_whisper_model()
     if model is None:
@@ -78,7 +81,7 @@ def transcribe_segments(audio_file):
         audio_file,
         beam_size=5,
         word_timestamps=True,
-        vad_filter=True,
+        vad_filter=use_vad,
         vad_parameters=dict(min_silence_duration_ms=500),
         **({"initial_prompt": initial_prompt} if initial_prompt else {}),
     )

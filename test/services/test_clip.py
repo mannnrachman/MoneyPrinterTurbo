@@ -113,6 +113,30 @@ class TestClipService(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 clip.download_youtube("https://example.com/v", "/tmp/x.mp4", 360)
 
+    def test_expand_windows_to_count_slides_for_short_source(self):
+        segments = [
+            {"msg": f"sentence {i}", "start_time": i * 2.0, "end_time": i * 2.0 + 1.5}
+            for i in range(30)
+        ]
+        windows = clip._build_windows(segments, 15.0)
+        self.assertLess(len(windows), 7)
+        expanded = clip._expand_windows_to_count(segments, windows, 15.0, 7)
+        self.assertEqual(len(expanded), 7)
+        # every window still snaps to a sentence start
+        starts = {float(s["start_time"]) for s in segments}
+        for window in expanded:
+            self.assertIn(window["start"], starts)
+
+    def test_expand_windows_to_count_returns_original_when_enough(self):
+        segments = [
+            {"msg": f"sentence {i}", "start_time": i * 2.0, "end_time": i * 2.0 + 1.5}
+            for i in range(120)
+        ]
+        windows = clip._build_windows(segments, 15.0)
+        self.assertGreaterEqual(len(windows), 5)
+        expanded = clip._expand_windows_to_count(segments, windows, 15.0, 5)
+        self.assertEqual(expanded, windows)
+
 
 
 if __name__ == "__main__":
