@@ -141,3 +141,30 @@ class TestClipService(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_generate_clips_renders_edited_windows_only(self):
+        """User-edited segments skip transcription and render exactly those ranges."""
+        import shutil
+        import tempfile
+
+        from app.services import clip
+        from app.utils import utils
+
+        with tempfile.TemporaryDirectory() as tmp:
+            task_id = utils.get_uuid()
+            task_dir = utils.task_dir(task_id)
+            os.makedirs(task_dir, exist_ok=True)
+            src = os.path.join(task_dir, "source.mp4")
+            shutil.copy("/tmp/ragnarok/source.mp4", src)
+            windows = [
+                {"start": 5.0, "end": 20.0, "text": "a"},
+                {"start": 40.0, "end": 60.0, "text": "b"},
+            ]
+            result = clip.generate_clips(
+                task_id, src, clip_count=7, clip_duration=15, windows=windows
+            )
+            self.assertEqual(len(result["clips"]), 2)
+            self.assertFalse(os.path.exists(src), "source should be cleaned up")
+
+if __name__ == "__main__":
+    unittest.main()

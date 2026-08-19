@@ -679,16 +679,40 @@ def _prepare_generation_task():
 
 def _prepare_clip_task():
     """Reserve a clip task ID before the Streamlit page reruns."""
-    task_id = str(uuid4())
+    task_id = st.session_state.get("clip_preview_task_id") or str(uuid4())
     st.session_state["pending_clip_task_id"] = task_id
     uploaded = st.session_state.get("clip_source_uploader")
     clip_url = st.session_state.get("clip_url_input", "") or ""
     subject = (
-        clip_url.strip()
+        st.session_state.get("clip_preview_subject")
+        or clip_url.strip()
         or getattr(uploaded, "name", "")
         or task_id
     )
     _add_active_generation_task(task_id, subject=subject)
+
+
+def _delete_clip_segment(index: int):
+    """Remove a segment from the preview edit list."""
+    segments = st.session_state.get("clip_preview_windows", [])
+    if 0 <= index < len(segments):
+        del segments[index]
+        st.session_state["clip_preview_windows"] = list(segments)
+
+
+def _add_clip_segment():
+    """Append an empty segment covering the last 15s of the source."""
+    segments = st.session_state.get("clip_preview_windows", [])
+    total = float(st.session_state.get("clip_preview_total_duration", 0) or 0)
+    start = max(0.0, total - 15.0)
+    segments.append({"start": start, "end": total, "text": ""})
+    st.session_state["clip_preview_windows"] = list(segments)
+
+
+def _has_clip_source():
+    uploaded = st.session_state.get("clip_source_uploader")
+    clip_url = st.session_state.get("clip_url_input", "") or ""
+    return uploaded is not None or bool(clip_url.strip())
 
 
 def _task_state_label(state, has_video):
@@ -1850,19 +1874,159 @@ def _render_clip_generation():
             _save_runtime_config()
             st.toast(tr("Whisper Model Updated"))
 
+    preview_cols = st.columns([1, 3])
+    with preview_cols[0]:
+        preview_clicked = st.button(
+            tr("Preview Clips"),
+            key="clip_preview_button",
+            use_container_width=True,
+            disabled=not _has_clip_source(),
+            help=tr("Preview Clips Help"),
+        )
+    with preview_cols[1]:
+        st.caption(tr("Preview Clips Note"))
+
+    if preview_clicked or st.session_state.get("clip_preview_running", False):
+        _render_clip_preview(
+            clip_url,
+            uploaded_file,
+            clip_count,
+            clip_duration,
+            selected_resolution,
+            clip_prompt,
+        )
+
+    edited_windows = st.session_state.get("clip_preview_windows")
+    if edited_windows:
+        _render_clip_segment_editor(edited_windows)
+
+    has_edited_source = edited_windows and os.path.isfile(
+        st.session_state.get("clip_preview_source", "") or ""
+    )
     submit = st.button(
         tr("Generate Clips"),
         type="primary",
         use_container_width=True,
         key="generate_clips_button",
         on_click=_prepare_clip_task,
-        disabled=uploaded_file is None and not clip_url.strip(),
+        disabled=(uploaded_file is None and not clip_url.strip()) or has_edited_source is False,
+        help=tr("Generate Clips Help") if has_edited_source else None,
     )
     if submit:
         task_id = st.session_state.get("pending_clip_task_id") or str(uuid4())
         task_dir = utils.task_dir(task_id)
+        task_dir_owner = False
         try:
-            source_path = None
+            # 用户已通过 Preview 编辑好片段：直接渲染，不再重新转写/打分。
+            edited_source = st.session_state.get("clip_preview_source", "") or ""
+            if edited_windows and os.path.isfile(edited_source):
+                _set_runtime_config("ui", "clip_count", int(clip_count))
+                _set_runtime_config("ui", "clip_duration", int(clip_duration))
+                _set_runtime_config("ui", "clip_prompt", clip_prompt)
+                _save_runtime_config()
+                webui_task.submit_clip_generation(
+                    task_id=task_id,
+                    video_path=edited_source,
+                    clip_count=int(clip_count),
+                    clip_duration=int(clip_duration),
+                    clip_prompt=clip_prompt,
+                    subject=st.session_state.get(
+                        "clip_preview_subject", os.path.basename(edited_source)
+                    ),
+                    capture_logs=not config.ui.get("hide_log", False),
+                    windows=[
+                        {"start": float(w["start"]), "end": float(w["end"]), "text": w.get("text", "")}
+                        for w in edited_windows
+                    ],
+                )
+                st.session_state["current_clip_task_id"] = task_id
+                logger.info(
+                    f"WebUI clip task submitted with edited segments: task_id={task_id}"
+                )
+                st.toast(tr("Generating Clips"))
+                _clear_clip_preview()
+            else:
+                source_path = None
+                if clip_url.strip():
+                    max_height = int(selected_resolution or 0)
+                    source_path = clip_service.download_youtube(
+                        clip_url.strip(),
+                        os.path.join(task_dir, "source.mp4"),
+                        max_height=max_height,
+                    )
+                    subject = clip_url.strip()
+                elif uploaded_file is not None:
+                    source_path = _build_uploaded_file_path(
+                        uploaded_file,
+                        task_dir,
+                        CLIP_SOURCE_EXTENSIONS,
+                        "source",
+                    )
+                    with open(source_path, "wb") as target:
+                        target.write(uploaded_file.getbuffer())
+                    subject = uploaded_file.name
+                else:
+                    raise ValueError("no clip source provided")
+                _set_runtime_config("ui", "clip_count", int(clip_count))
+                _set_runtime_config("ui", "clip_duration", int(clip_duration))
+                _set_runtime_config("ui", "clip_prompt", clip_prompt)
+                _set_runtime_config("ui", "clip_resolution", int(selected_resolution or 0))
+                _save_runtime_config()
+                webui_task.submit_clip_generation(
+                    task_id=task_id,
+                    video_path=source_path,
+                    clip_count=int(clip_count),
+                    clip_duration=int(clip_duration),
+                    clip_prompt=clip_prompt,
+                    subject=subject,
+                    capture_logs=not config.ui.get("hide_log", False),
+                )
+                st.session_state["current_clip_task_id"] = task_id
+                logger.info(f"WebUI clip task submitted: task_id={task_id}")
+                st.toast(tr("Generating Clips"))
+            task_dir_owner = True
+        except Exception as exc:
+            _remove_active_generation_task(task_id)
+            logger.exception(f"failed to submit WebUI clip task: {exc}")
+            st.error(f"{tr('Clip Generation Failed')}: {exc}")
+        finally:
+            if not task_dir_owner and os.path.isdir(task_dir):
+                shutil.rmtree(task_dir, ignore_errors=True)
+    _render_current_clip_task()
+
+
+def _clear_clip_preview():
+    """Drop cached preview state after segments were submitted."""
+    for key in (
+        "clip_preview_windows",
+        "clip_preview_source",
+        "clip_preview_task_id",
+        "clip_preview_subject",
+        "clip_preview_total_duration",
+        "clip_preview_running",
+    ):
+        st.session_state.pop(key, None)
+
+
+def _render_clip_preview(
+    clip_url: str,
+    uploaded_file,
+    clip_count,
+    clip_duration,
+    selected_resolution,
+    clip_prompt,
+):
+    """Transcribe the source and cache editable windows in session state."""
+    if st.session_state.get("clip_preview_running", False):
+        return
+    if st.session_state.get("clip_preview_windows"):
+        return
+    task_id = str(uuid4())
+    st.session_state["clip_preview_task_id"] = task_id
+    st.session_state["clip_preview_running"] = True
+    task_dir = utils.task_dir(task_id)
+    try:
+        with st.spinner(tr("Previewing Clips")):
             if clip_url.strip():
                 max_height = int(selected_resolution or 0)
                 source_path = clip_service.download_youtube(
@@ -1883,29 +2047,89 @@ def _render_clip_generation():
                 subject = uploaded_file.name
             else:
                 raise ValueError("no clip source provided")
-            _set_runtime_config("ui", "clip_count", int(clip_count))
-            _set_runtime_config("ui", "clip_duration", int(clip_duration))
-            _set_runtime_config("ui", "clip_prompt", clip_prompt)
-            _set_runtime_config("ui", "clip_resolution", int(selected_resolution or 0))
-            _save_runtime_config()
-            webui_task.submit_clip_generation(
-                task_id=task_id,
-                video_path=source_path,
-                clip_count=int(clip_count),
-                clip_duration=int(clip_duration),
-                clip_prompt=clip_prompt,
-                subject=subject,
-                capture_logs=not config.ui.get("hide_log", False),
+            result = clip_service.preview_windows(
+                source_path,
+                clip_duration=float(clip_duration or 0) or 45,
+                clip_count=int(clip_count or 5) or 5,
             )
-            st.session_state["current_clip_task_id"] = task_id
-            logger.info(f"WebUI clip task submitted: task_id={task_id}")
-            st.toast(tr("Generating Clips"))
-        except Exception as exc:
-            _remove_active_generation_task(task_id)
-            shutil.rmtree(task_dir, ignore_errors=True)
-            logger.exception(f"failed to submit WebUI clip task: {exc}")
-            st.error(f"{tr('Clip Generation Failed')}: {exc}")
-    _render_current_clip_task()
+        windows = [
+            {"start": float(w["start"]), "end": float(w["end"]), "text": str(w.get("text", ""))}
+            for w in result["windows"]
+        ]
+        if not windows:
+            st.warning(tr("Preview Clips Empty"))
+        st.session_state["clip_preview_windows"] = windows
+        st.session_state["clip_preview_source"] = source_path
+        st.session_state["clip_preview_subject"] = subject
+        st.session_state["clip_preview_total_duration"] = float(
+            result.get("total_duration") or 0
+        )
+        st.session_state["clip_preview_running"] = False
+    except Exception as exc:
+        st.session_state["clip_preview_running"] = False
+        st.session_state.pop("clip_preview_windows", None)
+        shutil.rmtree(task_dir, ignore_errors=True)
+        logger.exception(f"failed to preview clip task: {exc}")
+        st.error(f"{tr('Preview Clips Failed')}: {exc}")
+
+
+def _render_clip_segment_editor(segments):
+    """Render each segment as trim + delete controls (ranges are committed on rerun)."""
+    total = float(st.session_state.get("clip_preview_total_duration", 0) or 0)
+    st.markdown(f"**{tr('Clip Segments')}** ({len(segments)})")
+    st.caption(tr("Clip Segments Help"))
+    for i, seg in enumerate(segments):
+        start = float(seg.get("start", 0))
+        end = float(seg.get("end", start + 15))
+        if total > 0:
+            lo = min(max(start, 0.0), total)
+            hi = min(max(end, lo + 1), total)
+            range_key = f"clip_seg_{i}_range"
+            st.session_state.setdefault(
+                range_key, (lo, hi)
+            )
+            seg["start"] = lo
+        editor_row = st.columns([5, 1])
+        with editor_row[0]:
+            if total > 0:
+                st.slider(
+                    f"#{i + 1}",
+                    min_value=0.0,
+                    max_value=total,
+                    step=0.5,
+                    key=range_key,
+                )
+                seg["start"], seg["end"] = (
+                    float(st.session_state[range_key][0]),
+                    float(st.session_state[range_key][1]),
+                )
+            else:
+                cols = st.columns(2)
+                with cols[0]:
+                    seg["start"] = st.number_input(
+                        f"#{i + 1} start (s)", min_value=0.0, value=float(seg.get("start", 0)), step=0.5
+                    )
+                with cols[1]:
+                    seg["end"] = st.number_input(
+                        f"#{i + 1} end (s)", min_value=0.0, value=float(seg.get("end", 0)), step=0.5
+                    )
+            text = str(seg.get("text", "") or "").strip()
+            if text:
+                st.caption(" ".join(text.split())[:120])
+        with editor_row[1]:
+            st.button(
+                tr("Delete Clip Segment"),
+                key=f"clip_seg_{i}_del",
+                on_click=_delete_clip_segment,
+                args=(i,),
+                use_container_width=True,
+            )
+    st.button(
+        tr("Add Clip Segment"),
+        key="clip_seg_add",
+        on_click=_add_clip_segment,
+        use_container_width=True,
+    )
 
 
 def _render_generation_task_snapshot(task_id, task):

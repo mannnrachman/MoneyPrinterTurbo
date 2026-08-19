@@ -426,6 +426,59 @@ def download_youtube(url: str, output_path: str, max_height: int = 0) -> str:
     return downloaded
 
 
+def preview_windows(
+    video_path: str,
+    clip_duration=_DEFAULT_CLIP_DURATION,
+    clip_count=_DEFAULT_CLIP_COUNT,
+) -> dict:
+    """Transcribe a source and return editable candidate windows (no render).
+
+    Used by the WebUI preview step so the user can trim/extend/delete segments
+    before submitting them to ``generate_clips``.
+    """
+    duration = _normalize_clip_duration(clip_duration)
+    count = _normalize_clip_count(clip_count)
+    audio_path = f"{video_path}.preview.wav"
+    _extract_audio(video_path, audio_path)
+    try:
+        segments = subtitle.transcribe_segments(audio_path, use_vad=False)
+    finally:
+        _remove_file(audio_path)
+    windows = []
+    if segments:
+        windows = _build_windows(segments, duration)
+        if len(windows) < count:
+            windows = _expand_windows_to_count(
+                segments, windows, duration, count
+            )
+    return {"windows": windows, "total_duration": _probe_duration(video_path)}
+
+
+def _probe_duration(video_path: str) -> float:
+    import json
+
+    command = [
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "json", video_path,
+    ]
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, check=False
+        )
+        data = json.loads(result.stdout or "{}")
+        return float(data.get("format", {}).get("duration", 0) or 0)
+    except Exception:
+        return 0.0
+
+
+def _remove_file(path: str) -> None:
+    try:
+        if path and os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        logger.warning(f"could not remove file: {path}")
+
+
 def generate_clips(
     task_id: str,
     video_path: str,
@@ -433,8 +486,13 @@ def generate_clips(
     clip_duration=_DEFAULT_CLIP_DURATION,
     clip_prompt: str = "",
     subject: str = "",
+    windows: list | None = None,
 ):
-    """Orchestrate long-video -> short-clips for one task, updating task state."""
+    """Orchestrate long-video -> short-clips for one task, updating task state.
+
+    When ``windows`` is provided (user-edited preview segments), the pipeline
+    renders exactly those windows and skips transcription/LLM scoring.
+    """
     subtitle.reset_whisper_model()
     count = _normalize_clip_count(clip_count)
     duration = _normalize_clip_duration(clip_duration)
@@ -456,42 +514,57 @@ def generate_clips(
         )
 
         audio_path = os.path.join(task_dir, "audio.wav")
-        logger.info(f"extracting audio: {video_path}")
-        _extract_audio(video_path, audio_path)
-        sm.state.update_task(task_id, progress=20, **task_metadata)
+        if windows:
+            # user-edited segments: skip transcription + scoring entirely
+            picked = [
+                window
+                for window in windows
+                if float(window.get("end", 0)) > float(window.get("start", 0))
+            ]
+            if not picked:
+                return tm._mark_task_failed(
+                    task_id,
+                    "windows",
+                    "no valid clip segments selected",
+                    details=task_metadata,
+                )
+        else:
+            logger.info(f"extracting audio: {video_path}")
+            _extract_audio(video_path, audio_path)
+            sm.state.update_task(task_id, progress=20, **task_metadata)
 
-        segments = subtitle.transcribe_segments(audio_path, use_vad=False)
-        if segments is None:
-            return tm._mark_task_failed(
-                task_id,
-                "transcript",
-                "whisper transcription unavailable",
-                details=task_metadata,
-            )
-        if not segments:
-            return tm._mark_task_failed(
-                task_id,
-                "transcript",
-                "no speech detected in video",
-                details=task_metadata,
-            )
-        sm.state.update_task(task_id, progress=40, **task_metadata)
+            segments = subtitle.transcribe_segments(audio_path, use_vad=False)
+            if segments is None:
+                return tm._mark_task_failed(
+                    task_id,
+                    "transcript",
+                    "whisper transcription unavailable",
+                    details=task_metadata,
+                )
+            if not segments:
+                return tm._mark_task_failed(
+                    task_id,
+                    "transcript",
+                    "no speech detected in video",
+                    details=task_metadata,
+                )
+            sm.state.update_task(task_id, progress=40, **task_metadata)
 
-        windows = _build_windows(segments, duration)
-        if len(windows) < count:
-            windows = _expand_windows_to_count(
-                segments, windows, duration, count
-            )
-        if not windows:
-            return tm._mark_task_failed(
-                task_id,
-                "windows",
-                "transcript too short to clip",
-                details=task_metadata,
-            )
+            windows = _build_windows(segments, duration)
+            if len(windows) < count:
+                windows = _expand_windows_to_count(
+                    segments, windows, duration, count
+                )
+            if not windows:
+                return tm._mark_task_failed(
+                    task_id,
+                    "windows",
+                    "transcript too short to clip",
+                    details=task_metadata,
+                )
 
-        scores = _score_windows(windows, clip_prompt)
-        picked = _pick_windows(windows, scores, count)
+            scores = _score_windows(windows, clip_prompt)
+            picked = _pick_windows(windows, scores, count)
         sm.state.update_task(task_id, progress=60, **task_metadata)
 
         clip_paths = []

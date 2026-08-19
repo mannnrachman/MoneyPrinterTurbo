@@ -181,6 +181,7 @@ def _run_clip_generation(
     clip_prompt: str,
     subject: str,
     capture_logs: bool,
+    windows: list | None = None,
 ):
     """Run the clip pipeline in the same isolated worker pattern as video generation."""
     log_handler_id = None
@@ -203,6 +204,7 @@ def _run_clip_generation(
                 clip_duration=clip_duration,
                 clip_prompt=clip_prompt,
                 subject=subject,
+                windows=windows,
             )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
@@ -242,6 +244,7 @@ def submit_clip_generation(
     clip_prompt: str = "",
     subject: str = "",
     capture_logs: bool = True,
+    windows: list | None = None,
 ) -> None:
     """Queue a long-video clipping task for the Streamlit UI."""
     subject = str(subject or os.path.basename(video_path) or task_id)
@@ -262,6 +265,7 @@ def submit_clip_generation(
             clip_prompt=clip_prompt,
             subject=subject,
             capture_logs=capture_logs,
+            windows=windows,
         )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
