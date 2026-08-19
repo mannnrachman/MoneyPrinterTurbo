@@ -314,6 +314,11 @@ compute_type = "int8"
 # Leave empty to disable.
 # initial_prompt = ""
 
+# Voice Activity Detection for CLIP transcribes. When enabled, silent/music
+# stretches are skipped (faster, best for podcasts/talk). When disabled, every
+# sound is transcribed so sung/music content is kept (slower). Default: false.
+use_vad = false
+
 # =============================================================================
 # Material Request Proxy / 素材请求代理
 # =============================================================================

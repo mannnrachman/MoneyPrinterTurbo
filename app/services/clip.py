@@ -57,6 +57,13 @@ def _normalize_clip_count(value, default: int = _DEFAULT_CLIP_COUNT) -> int:
     return max(1, min(count, _MAX_CLIP_COUNT))
 
 
+def _clip_use_vad() -> bool:
+    """Read the VAD toggle from config (UI checkbox / [whisper] use_vad)."""
+    from app.config import config
+
+    return bool(config.whisper.get("use_vad", False))
+
+
 def _normalize_clip_duration(value, default: float = _DEFAULT_CLIP_DURATION) -> float:
     try:
         duration = float(value)
@@ -441,7 +448,7 @@ def preview_windows(
     audio_path = f"{video_path}.preview.wav"
     _extract_audio(video_path, audio_path)
     try:
-        segments = subtitle.transcribe_segments(audio_path, use_vad=False)
+        segments = subtitle.transcribe_segments(audio_path, use_vad=_clip_use_vad())
     finally:
         _remove_file(audio_path)
     windows = []
@@ -533,7 +540,7 @@ def generate_clips(
             _extract_audio(video_path, audio_path)
             sm.state.update_task(task_id, progress=20, **task_metadata)
 
-            segments = subtitle.transcribe_segments(audio_path, use_vad=False)
+            segments = subtitle.transcribe_segments(audio_path, use_vad=_clip_use_vad())
             if segments is None:
                 return tm._mark_task_failed(
                     task_id,

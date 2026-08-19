@@ -1866,6 +1866,17 @@ def _render_clip_generation():
         )
     with whisper_cols[1]:
         st.caption(tr("Whisper Model Note"))
+    vad_cols = st.columns([1, 1])
+    with vad_cols[0]:
+        saved_use_vad = bool(config.whisper.get("use_vad", False))
+        st.session_state.setdefault("clip_use_vad_checkbox", saved_use_vad)
+        use_vad = st.checkbox(
+            tr("Enable VAD Filter"),
+            key="clip_use_vad_checkbox",
+            help=tr("Enable VAD Filter Help"),
+        )
+    with vad_cols[1]:
+        st.caption(tr("Enable VAD Filter Note"))
     chosen_whisper_model = st.session_state.get("clip_whisper_model")
     if chosen_whisper_model and chosen_whisper_model != saved_whisper_model:
         updated = _set_runtime_config("whisper", "model_size", chosen_whisper_model)
@@ -1873,7 +1884,10 @@ def _render_clip_generation():
             subtitle.reset_whisper_model()
             _save_runtime_config()
             st.toast(tr("Whisper Model Updated"))
-
+    saved_use_vad = bool(config.whisper.get("use_vad", False))
+    if use_vad != saved_use_vad:
+        if _set_runtime_config("whisper", "use_vad", bool(use_vad)):
+            _save_runtime_config()
     preview_cols = st.columns([1, 3])
     with preview_cols[0]:
         preview_clicked = st.button(
