@@ -280,6 +280,7 @@ def generate_clips(
     subject: str = "",
 ):
     """Orchestrate long-video -> short-clips for one task, updating task state."""
+    subtitle.reset_whisper_model()
     count = _normalize_clip_count(clip_count)
     duration = _normalize_clip_duration(clip_duration)
     task_dir = utils.task_dir(task_id)

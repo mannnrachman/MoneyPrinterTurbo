@@ -19,6 +19,17 @@ initial_prompt = config.whisper.get("initial_prompt", "") or None
 model = None
 
 
+def reset_whisper_model():
+    """Reload whisper config and drop the cached model so the next call loads the new one."""
+    global model_size, device, compute_type, initial_prompt, model
+    model_size = config.whisper.get("model_size", "large-v3")
+    device = config.whisper.get("device", "cpu")
+    compute_type = config.whisper.get("compute_type", "int8")
+    initial_prompt = config.whisper.get("initial_prompt", "") or None
+    model = None
+    logger.info(f"whisper config reloaded, model: {model_size}")
+
+
 def _load_whisper_model():
     """Lazy-load the process-wide faster-whisper model (once per process)."""
     global model

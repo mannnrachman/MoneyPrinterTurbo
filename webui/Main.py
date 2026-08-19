@@ -47,6 +47,7 @@ from app.services import (
     cache_manager,
     llm,
     loomloom,
+    subtitle,
     video,
     voice,
     webui_task,
@@ -140,6 +141,7 @@ _RUNTIME_CONFIG_SECTIONS = {
     "minimax_tts": config.minimax_tts,
     "siliconflow": config.siliconflow,
     "ui": config.ui,
+    "whisper": config.whisper,
 }
 
 
@@ -1740,6 +1742,29 @@ def _render_clip_generation():
             max_chars=1000,
             help=tr("Clip Focus Prompt Help"),
         )
+
+    whisper_cols = st.columns([1, 1])
+    with whisper_cols[0]:
+        whisper_models = ["tiny", "base", "small", "medium", "large-v3"]
+        saved_whisper_model = config.whisper.get("model_size", "large-v3")
+        if saved_whisper_model not in whisper_models:
+            whisper_models.append(saved_whisper_model)
+        st.selectbox(
+            tr("Whisper Model"),
+            whisper_models,
+            index=whisper_models.index(saved_whisper_model),
+            key="clip_whisper_model",
+            help=tr("Whisper Model Help"),
+        )
+    with whisper_cols[1]:
+        st.caption(tr("Whisper Model Note"))
+    chosen_whisper_model = st.session_state.get("clip_whisper_model")
+    if chosen_whisper_model and chosen_whisper_model != saved_whisper_model:
+        updated = _set_runtime_config("whisper", "model_size", chosen_whisper_model)
+        if updated:
+            subtitle.reset_whisper_model()
+            _save_runtime_config()
+            st.toast(tr("Whisper Model Updated"))
 
     submit = st.button(
         tr("Generate Clips"),
