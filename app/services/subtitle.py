@@ -19,11 +19,12 @@ initial_prompt = config.whisper.get("initial_prompt", "") or None
 model = None
 
 
-def create(audio_file, subtitle_file: str = ""):
+def _load_whisper_model():
+    """Lazy-load the process-wide faster-whisper model (once per process)."""
     global model
     if WhisperModel is None:
         logger.warning("faster_whisper not available, skipping whisper subtitle generation")
-        return ""
+        return None
     if not model:
         model_path = f"{utils.root_dir()}/models/whisper-{model_size}"
         model_bin_file = f"{model_path}/model.bin"
@@ -47,10 +48,20 @@ def create(audio_file, subtitle_file: str = ""):
                 f"********************************************\n\n"
             )
             return None
+    return model
 
-    logger.info(f"start, output file: {subtitle_file}")
-    if not subtitle_file:
-        subtitle_file = f"{audio_file}.srt"
+
+def transcribe_segments(audio_file):
+    """
+    Transcribe an audio file into sentence segments with timestamps.
+
+    Returns a list of ``{"msg", "start_time", "end_time"}`` dicts, or ``None``
+    when whisper is unavailable or the model fails to load. Word-level
+    timestamps from whisper are collapsed onto sentence boundaries.
+    """
+    model = _load_whisper_model()
+    if model is None:
+        return None
 
     segments, info = model.transcribe(
         audio_file,
@@ -65,20 +76,7 @@ def create(audio_file, subtitle_file: str = ""):
         f"detected language: '{info.language}', probability: {info.language_probability:.2f}"
     )
 
-    start = timer()
     subtitles = []
-
-    def recognized(seg_text, seg_start, seg_end):
-        seg_text = seg_text.strip()
-        if not seg_text:
-            return
-
-        msg = "[%.2fs -> %.2fs] %s" % (seg_start, seg_end, seg_text)
-        logger.debug(msg)
-
-        subtitles.append(
-            {"msg": seg_text, "start_time": seg_start, "end_time": seg_end}
-        )
 
     for segment in segments:
         words_idx = 0
@@ -105,7 +103,13 @@ def create(audio_file, subtitle_file: str = ""):
                     if not seg_text:
                         continue
 
-                    recognized(seg_text, seg_start, seg_end)
+                    subtitles.append(
+                        {
+                            "msg": seg_text.strip(),
+                            "start_time": seg_start,
+                            "end_time": seg_end,
+                        }
+                    )
 
                     is_segmented = False
                     seg_text = ""
@@ -119,13 +123,27 @@ def create(audio_file, subtitle_file: str = ""):
         if not seg_text:
             continue
 
-        recognized(seg_text, seg_start, seg_end)
+        subtitles.append(
+            {"msg": seg_text.strip(), "start_time": seg_start, "end_time": seg_end}
+        )
 
-    end = timer()
+    return subtitles
 
-    diff = end - start
-    logger.info(f"complete, elapsed: {diff:.2f} s")
 
+def create(audio_file, subtitle_file: str = ""):
+    if WhisperModel is None:
+        # 可选 Whisper 依赖未安装时应跳过，而不是在任务线程中抛异常。
+        return ""
+    subtitles = transcribe_segments(audio_file)
+    if subtitles is None:
+        # 模型下载或初始化失败时返回失败结果，允许任务层更新状态。
+        return None
+
+    logger.info(f"start, output file: {subtitle_file}")
+    if not subtitle_file:
+        subtitle_file = f"{audio_file}.srt"
+
+    start = timer()
     idx = 1
     lines = []
     for subtitle in subtitles:
@@ -138,11 +156,14 @@ def create(audio_file, subtitle_file: str = ""):
             )
             idx += 1
 
+    end = timer()
+    diff = end - start
+    logger.info(f"complete, elapsed: {diff:.2f} s")
+
     sub = "\n".join(lines) + "\n"
     with open(subtitle_file, "w", encoding="utf-8") as f:
         f.write(sub)
     logger.info(f"subtitle file created: {subtitle_file}")
-
 
 def file_to_subtitles(filename):
     if not filename or not os.path.isfile(filename):
@@ -172,7 +193,6 @@ def file_to_subtitles(filename):
         times_texts.append((index, current_times.strip(), current_text.strip()))
     return times_texts
 
-
 def levenshtein_distance(s1, s2):
     if len(s1) < len(s2):
         return levenshtein_distance(s2, s1)
@@ -192,12 +212,10 @@ def levenshtein_distance(s1, s2):
 
     return previous_row[-1]
 
-
 def similarity(a, b):
     distance = levenshtein_distance(a.lower(), b.lower())
     max_length = max(len(a), len(b))
     return 1 - (distance / max_length)
-
 
 def correct(subtitle_file, video_script):
     subtitle_items = file_to_subtitles(subtitle_file)
@@ -292,7 +310,6 @@ def correct(subtitle_file, video_script):
         logger.info("Subtitle corrected")
     else:
         logger.success("Subtitle is correct")
-
 
 if __name__ == "__main__":
     task_id = "c12fd1e6-4b0a-4d65-a075-c87abe35a072"

@@ -125,6 +125,7 @@ LOCAL_MATERIAL_EXTENSIONS = {
     ".jpeg",
     ".png",
 }
+CLIP_SOURCE_EXTENSIONS = {".mp4", ".mov", ".avi", ".flv", ".mkv", ".webm"}
 CUSTOM_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 _FINAL_VIDEO_PATTERN = re.compile(
     r"^final-(?P<index>\d+)\.(?P<extension>mp4|mov|mkv|webm)$",
@@ -450,6 +451,13 @@ def _initialize_session_state():
         # 最近一次从当前页面提交的任务。生成改为后台执行后，页面 Fragment
         # 通过这个 ID 查询状态；刷新时不再依赖正在执行的旧页面脚本。
         "current_generation_task_id": "",
+        "current_clip_task_id": "",
+        "pending_clip_task_id": "",
+        "clip_count_input": _saved_ui_number("clip_count", 5, 1, 20, int),
+        "clip_duration_input": _saved_ui_number(
+            "clip_duration", 45, 10, 60, int
+        ),
+        "clip_prompt_input": _saved_ui_text("clip_prompt", max_length=1000),
         # LoomLoom 询价与执行必须跨 Streamlit rerun 保留完全相同的输入和
         # clientRequestId，避免网络重试产生重复付费任务。
         "loomloom_script_batch": None,
@@ -546,7 +554,15 @@ def _find_final_task_video(task_path: str) -> str:
             candidates.append((int(match.group("index")), file_name))
 
     if not candidates:
-        return ""
+        clip_candidates = []
+        for file_name in files:
+            match = re.fullmatch(r"clip-(\d+)\.mp4", file_name, re.IGNORECASE)
+            if match:
+                clip_candidates.append((int(match.group(1)), file_name))
+        if not clip_candidates:
+            return ""
+        _, file_name = min(clip_candidates, key=lambda item: item[0])
+        return os.path.join(task_path, file_name)
 
     _, file_name = min(candidates, key=lambda item: item[0])
     return os.path.join(task_path, file_name)
@@ -643,6 +659,8 @@ def _remove_active_generation_task(task_id):
         del tasks[task_id]
     if st.session_state.get("pending_generation_task_id") == task_id:
         del st.session_state["pending_generation_task_id"]
+    if st.session_state.get("pending_clip_task_id") == task_id:
+        del st.session_state["pending_clip_task_id"]
 
 
 def _prepare_generation_task():
@@ -653,6 +671,15 @@ def _prepare_generation_task():
     subject = st.session_state.get("video_subject") or st.session_state.get(
         "video_script"
     )
+    _add_active_generation_task(task_id, subject=subject)
+
+
+def _prepare_clip_task():
+    """Reserve a clip task ID before the Streamlit page reruns."""
+    task_id = str(uuid4())
+    st.session_state["pending_clip_task_id"] = task_id
+    uploaded = st.session_state.get("clip_source_uploader")
+    subject = getattr(uploaded, "name", "") or task_id
     _add_active_generation_task(task_id, subject=subject)
 
 
@@ -754,11 +781,18 @@ def _collect_task_summaries(limit=20):
         task_path = os.path.join(utils.task_dir(), task_id)
         history_task = history_tasks.get(task_id, {})
         video_files = task.get("videos") or []
+        clip_files = task.get("clips") or []
         video_file = (
-            video_files[0] if video_files else history_task.get("video_file", "")
+            video_files[0]
+            if video_files
+            else clip_files[0]
+            if clip_files
+            else history_task.get("video_file", "")
         )
         subject = (
             task.get("video_subject")
+            or task.get("subject")
+            or task.get("clip_source")
             or history_task.get("subject")
             or (task.get("script", "")[:40] if task.get("script") else "")
             or task_id
@@ -1563,6 +1597,192 @@ def _render_generation_logs(task_id):
         return
 
     st.code("\n".join(log_records))
+
+
+def _render_clip_task_snapshot(task_id, task):
+    """Render clip-task progress and downloadable clip previews."""
+    if not task:
+        st.info(tr("Generating Clips"))
+        _render_generation_logs(task_id)
+        return
+
+    state = _normalize_task_state(task.get("state"))
+    progress = max(0, min(100, int(task.get("progress", 0) or 0)))
+    if state == const.TASK_STATE_PROCESSING:
+        st.info(tr("Generating Clips"))
+        st.progress(progress, text=f"{tr('Task Progress')}: {progress}%")
+        _render_generation_logs(task_id)
+        return
+
+    if state == const.TASK_STATE_FAILED:
+        error = str(task.get("error") or "").strip()
+        message = tr("Clip Generation Failed")
+        st.error(f"{message}: {error}" if error else message)
+        _render_generation_logs(task_id)
+        return
+
+    clip_files = task.get("clips") or []
+    if state != const.TASK_STATE_COMPLETE or not clip_files:
+        st.error(tr("Clip Generation Failed"))
+        _render_generation_logs(task_id)
+        return
+
+    st.success(tr("Clip Generation Completed"))
+    try:
+        columns = st.columns(min(3, len(clip_files)))
+        for index, clip_file in enumerate(clip_files):
+            with columns[index % len(columns)]:
+                st.video(clip_file)
+                if not os.path.isfile(clip_file):
+                    continue
+                with open(clip_file, "rb") as video_file:
+                    st.download_button(
+                        f"{tr('Download Clip')} {index + 1}",
+                        data=video_file,
+                        file_name=f"clip-{index + 1}.mp4",
+                        mime="video/mp4",
+                        key=f"download_generated_clip_{task_id}_{index}",
+                        icon=":material/download:",
+                        on_click="ignore",
+                        use_container_width=True,
+                    )
+    except Exception as exc:
+        logger.exception(
+            f"failed to render clip previews: task_id={task_id}, "
+            f"clip_files={clip_files}, error={exc}"
+        )
+
+    _render_generation_logs(task_id)
+    if st.session_state.get("handled_clip_task_id") != task_id:
+        st.session_state["handled_clip_task_id"] = task_id
+        if config.ui.get("open_task_folder_on_completion", True):
+            open_task_folder(task_id)
+        logger.info(f"{tr('Clip Generation Completed')}: task_id={task_id}")
+
+
+@st.fragment(run_every=webui_task.TASK_LOG_REFRESH_INTERVAL_SECONDS)
+def _render_running_clip_task(task_id):
+    """Poll a running clip task without blocking the main Streamlit script."""
+    try:
+        task = sm.state.get_task(task_id)
+    except Exception as exc:
+        logger.exception(
+            f"failed to query WebUI clip task: task_id={task_id}, error={exc}"
+        )
+        st.error(tr("Clip Generation Failed"))
+        return
+
+    state = _normalize_task_state((task or {}).get("state"))
+    if state in {const.TASK_STATE_COMPLETE, const.TASK_STATE_FAILED}:
+        _remove_active_generation_task(task_id)
+        st.rerun(scope="app")
+    _render_clip_task_snapshot(task_id, task)
+
+
+def _render_current_clip_task():
+    """Restore the latest clip-task result below the clip form."""
+    task_id = st.session_state.get("current_clip_task_id", "")
+    if not task_id:
+        return
+    try:
+        task = sm.state.get_task(task_id)
+    except Exception as exc:
+        logger.exception(
+            f"failed to query current WebUI clip task: task_id={task_id}, error={exc}"
+        )
+        st.error(tr("Clip Generation Failed"))
+        return
+
+    state = _normalize_task_state((task or {}).get("state"))
+    if state in {const.TASK_STATE_COMPLETE, const.TASK_STATE_FAILED}:
+        _remove_active_generation_task(task_id)
+        _render_clip_task_snapshot(task_id, task)
+        return
+    _render_running_clip_task(task_id)
+
+
+def _render_clip_generation():
+    """Render the long-video-to-shorts UI and submit one background task."""
+    st.subheader(tr("Long Video to Shorts"))
+    st.caption(tr("Long Video to Shorts Help"))
+    uploaded_file = st.file_uploader(
+        tr("Upload Long Video"),
+        type=sorted(
+            extension.removeprefix(".") for extension in CLIP_SOURCE_EXTENSIONS
+        ),
+        accept_multiple_files=False,
+        key="clip_source_uploader",
+        help=tr("Upload Long Video Help"),
+    )
+    settings_cols = st.columns(3)
+    with settings_cols[0]:
+        clip_count = st.number_input(
+            tr("Clip Count"),
+            min_value=1,
+            max_value=20,
+            step=1,
+            key="clip_count_input",
+            help=tr("Clip Count Help"),
+        )
+    with settings_cols[1]:
+        clip_duration = st.number_input(
+            tr("Clip Duration Seconds"),
+            min_value=10,
+            max_value=60,
+            step=5,
+            key="clip_duration_input",
+            help=tr("Clip Duration Seconds Help"),
+        )
+    with settings_cols[2]:
+        clip_prompt = st.text_input(
+            tr("Clip Focus Prompt"),
+            key="clip_prompt_input",
+            max_chars=1000,
+            help=tr("Clip Focus Prompt Help"),
+        )
+
+    submit = st.button(
+        tr("Generate Clips"),
+        type="primary",
+        use_container_width=True,
+        key="generate_clips_button",
+        on_click=_prepare_clip_task,
+        disabled=uploaded_file is None,
+    )
+    if submit:
+        task_id = st.session_state.get("pending_clip_task_id") or str(uuid4())
+        task_dir = utils.task_dir(task_id)
+        try:
+            source_path = _build_uploaded_file_path(
+                uploaded_file,
+                task_dir,
+                CLIP_SOURCE_EXTENSIONS,
+                "source",
+            )
+            with open(source_path, "wb") as target:
+                target.write(uploaded_file.getbuffer())
+            _set_runtime_config("ui", "clip_count", int(clip_count))
+            _set_runtime_config("ui", "clip_duration", int(clip_duration))
+            _set_runtime_config("ui", "clip_prompt", clip_prompt)
+            _save_runtime_config()
+            webui_task.submit_clip_generation(
+                task_id=task_id,
+                video_path=source_path,
+                clip_count=int(clip_count),
+                clip_duration=int(clip_duration),
+                clip_prompt=clip_prompt,
+                subject=uploaded_file.name,
+                capture_logs=not config.ui.get("hide_log", False),
+            )
+            st.session_state["current_clip_task_id"] = task_id
+            logger.info(f"WebUI clip task submitted: task_id={task_id}")
+            st.toast(tr("Generating Clips"))
+        except Exception as exc:
+            _remove_active_generation_task(task_id)
+            shutil.rmtree(task_dir, ignore_errors=True)
+            logger.exception(f"failed to submit WebUI clip task: {exc}")
+            st.error(tr("Clip Generation Failed"))
+    _render_current_clip_task()
 
 
 def _render_generation_task_snapshot(task_id, task):
@@ -5316,7 +5536,7 @@ def _render_generation_controls(
 
 
 def _render_application():
-    """按固定顺序渲染顶部栏、弹窗、生成表单和任务结果。"""
+    """按固定顺序渲染顶部栏、生成表单、剪辑工具和任务结果。"""
     _render_top_bar()
 
     if st.session_state.get("settings_dialog_open", False):
@@ -5357,6 +5577,9 @@ def _render_application():
         uploaded_bgm_file,
         voice_mode,
     )
+
+    with st.expander(tr("Long Video to Shorts"), expanded=False):
+        _render_clip_generation()
 
     # 生成分支在启动后台线程前已经请求过保存。普通控件交互继续请求非阻塞保存；
     # 如果后台任务正在使用配置，配置层会在任务结束时自动应用并落盘最新值。

@@ -1,3 +1,4 @@
+import os
 import threading
 from collections import deque
 
@@ -7,6 +8,7 @@ from app.config import config
 from app.controllers.manager.memory_manager import InMemoryTaskManager
 from app.models import const
 from app.models.schema import VideoParams
+from app.services import clip as clip_service
 from app.services import state as sm
 from app.services import task as tm
 from app.services.loomloom import LoomLoomConfirmedVideoRequest
@@ -167,5 +169,112 @@ def submit_generation(
         )
         logger.exception(
             f"failed to submit WebUI generation task, task_id={task_id}, error={exc}"
+        )
+        raise
+
+
+def _run_clip_generation(
+    task_id: str,
+    video_path: str,
+    clip_count: int,
+    clip_duration: int,
+    clip_prompt: str,
+    subject: str,
+    capture_logs: bool,
+):
+    """Run the clip pipeline in the same isolated worker pattern as video generation."""
+    log_handler_id = None
+    worker_thread_id = threading.get_ident()
+    try:
+        if capture_logs:
+            log_handler_id = logger.add(
+                lambda message: _append_task_log(task_id, str(message)),
+                level="DEBUG",
+                format=format_log_record,
+                colorize=False,
+                filter=lambda record: record["thread"].id == worker_thread_id,
+            )
+
+        with config.runtime_config_lock():
+            return clip_service.generate_clips(
+                task_id=task_id,
+                video_path=video_path,
+                clip_count=clip_count,
+                clip_duration=clip_duration,
+                clip_prompt=clip_prompt,
+                subject=subject,
+            )
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        failure = {
+            "task_id": task_id,
+            "state": const.TASK_STATE_FAILED,
+            "progress": 0,
+            "failed_stage": "webui_clip_worker",
+            "error": error,
+        }
+        sm.state.update_task(
+            task_id,
+            state=failure["state"],
+            progress=failure["progress"],
+            failed_stage=failure["failed_stage"],
+            error=failure["error"],
+        )
+        logger.exception(
+            f"unexpected WebUI clip worker failure, task_id={task_id}, error={exc}"
+        )
+        return failure
+    finally:
+        if log_handler_id is not None:
+            try:
+                logger.remove(log_handler_id)
+            except ValueError:
+                logger.debug(
+                    f"WebUI clip log handler already removed: task_id={task_id}"
+                )
+
+
+def submit_clip_generation(
+    task_id: str,
+    video_path: str,
+    clip_count: int = 5,
+    clip_duration: int = 45,
+    clip_prompt: str = "",
+    subject: str = "",
+    capture_logs: bool = True,
+) -> None:
+    """Queue a long-video clipping task for the Streamlit UI."""
+    subject = str(subject or os.path.basename(video_path) or task_id)
+    sm.state.update_task(
+        task_id,
+        state=const.TASK_STATE_PROCESSING,
+        progress=0,
+        subject=subject,
+        clip_source=subject,
+    )
+    try:
+        _task_manager.add_task(
+            _run_clip_generation,
+            task_id=task_id,
+            video_path=video_path,
+            clip_count=clip_count,
+            clip_duration=clip_duration,
+            clip_prompt=clip_prompt,
+            subject=subject,
+            capture_logs=capture_logs,
+        )
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        sm.state.update_task(
+            task_id,
+            state=const.TASK_STATE_FAILED,
+            progress=0,
+            failed_stage="scheduling",
+            error=error,
+            subject=subject,
+            clip_source=subject,
+        )
+        logger.exception(
+            f"failed to submit WebUI clip task, task_id={task_id}, error={exc}"
         )
         raise
