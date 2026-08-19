@@ -310,6 +310,11 @@ def download_youtube(url: str, output_path: str, max_height: int = 0) -> str:
     """
     if YoutubeDL is None:
         raise RuntimeError("yt-dlp is not installed")
+    # PO Token provider (bgutil) runs on Deno; make sure it is discoverable
+    # even when this process was started without a login shell PATH.
+    deno_bin = os.path.expanduser("~/.deno/bin")
+    if os.path.isdir(deno_bin) and deno_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = f"{deno_bin}:{os.environ.get('PATH', '')}"
     if max_height and max_height > 0:
         format_selector = (
             f"bestvideo[height<={max_height}]+bestaudio/"
@@ -320,6 +325,10 @@ def download_youtube(url: str, output_path: str, max_height: int = 0) -> str:
 
     output_dir = os.path.dirname(output_path) or "."
     output_stem = os.path.splitext(os.path.basename(output_path))[0]
+    # YouTube 2026: format URLs for some player clients require a PO Token;
+    # without it GVS returns HTTP 403 while metadata extraction still works.
+    # The community fix is dropping android_sdkless and sticking to default
+    # clients (https://github.com/yt-dlp/yt-dlp/issues/15723).
     options = {
         "format": format_selector,
         "outtmpl": os.path.join(output_dir, f"{output_stem}.%(ext)s"),
@@ -328,13 +337,33 @@ def download_youtube(url: str, output_path: str, max_height: int = 0) -> str:
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
+        "extractor_args": {
+            "youtube": {"player_client": ["default", "-android_sdkless"]}
+        },
     }
     logger.info(
         f"downloading youtube video: {url}, max_height: {max_height or 'best'}"
     )
-    with YoutubeDL(options) as ydl:
-        info = ydl.extract_info(url, download=True)
-        downloaded = ydl.prepare_filename(info)
+    last_error = None
+    for attempt, current_format in enumerate(
+        (format_selector, "bestvideo+bestaudio/best", "best")
+    ):
+        options["format"] = current_format
+        try:
+            with YoutubeDL(options) as ydl:
+                info = ydl.extract_info(url, download=True)
+                downloaded = ydl.prepare_filename(info)
+            break
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                f"youtube download attempt {attempt + 1} failed "
+                f"(format={current_format}): {exc}"
+            )
+    else:
+        raise RuntimeError(
+            f"unable to download video: {last_error}"
+        )
     if not os.path.isfile(downloaded):
         # merged formats may end up with a different extension than prepared
         candidates = sorted(
