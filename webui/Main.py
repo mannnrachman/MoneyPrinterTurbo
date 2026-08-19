@@ -1728,17 +1728,59 @@ def _render_clip_generation():
         placeholder=tr("Clip YouTube URL Placeholder"),
         help=tr("Clip YouTube URL Help"),
     )
+    # 清空缓存：URL 变化后旧视频的可用分辨率不再有效。
+    if clip_url.strip() != st.session_state.get("clip_fetch_url", ""):
+        st.session_state.pop("clip_video_info", None)
+        st.session_state["clip_fetch_url"] = clip_url.strip()
+    fetch_cols = st.columns([1, 3])
+    with fetch_cols[0]:
+        fetch_clicked = st.button(
+            tr("Fetch Video Info"),
+            key="clip_fetch_info_button",
+            use_container_width=True,
+            disabled=not clip_url.strip(),
+            help=tr("Fetch Video Info Help"),
+        )
+    if fetch_clicked:
+        try:
+            with st.spinner(tr("Fetching Video Info")):
+                st.session_state["clip_video_info"] = clip_service.fetch_youtube_info(
+                    clip_url.strip()
+                )
+        except Exception as exc:
+            st.session_state.pop("clip_video_info", None)
+            st.error(f"{tr('Fetch Video Info Failed')}: {exc}")
+
+    video_info = st.session_state.get("clip_video_info") or {}
+    if video_info:
+        title = str(video_info.get("title") or "")
+        duration = float(video_info.get("duration") or 0)
+        duration_text = f"{int(duration // 60)}:{int(duration % 60):02d}"
+        heights = [int(h) for h in (video_info.get("heights") or [])]
+        st.caption(
+            f"**{title}** · {duration_text} · "
+            f"{tr('Available Resolutions')}: {', '.join(f'{h}p' for h in heights) or '-'}"
+        )
+    else:
+        heights = []
+
     url_cols = st.columns([1, 2])
     with url_cols[0]:
-        resolution_options = [
-            (tr("Resolution Auto"), 0),
-            (tr("Resolution 360p"), 360),
-            (tr("Resolution 480p"), 480),
-            (tr("Resolution 720p"), 720),
-            (tr("Resolution 1080p"), 1080),
-            (tr("Resolution 1440p"), 1440),
-            (tr("Resolution 4K"), 2160),
-        ]
+        if heights:
+            resolution_options = [(tr("Resolution Auto"), 0)] + [
+                (tr("Resolution 4K") if h == 2160 else f"{h}p", h)
+                for h in heights
+            ]
+        else:
+            resolution_options = [
+                (tr("Resolution Auto"), 0),
+                (tr("Resolution 360p"), 360),
+                (tr("Resolution 480p"), 480),
+                (tr("Resolution 720p"), 720),
+                (tr("Resolution 1080p"), 1080),
+                (tr("Resolution 1440p"), 1440),
+                (tr("Resolution 4K"), 2160),
+            ]
         saved_resolution = int(config.ui.get("clip_resolution", 0) or 0)
         resolution_index = 0
         for i, (_, res) in enumerate(resolution_options):

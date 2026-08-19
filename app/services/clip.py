@@ -276,6 +276,32 @@ def _render_clip(video_path: str, start: float, end: float, output_path: str) ->
         )
 
 
+def fetch_youtube_info(url: str) -> dict:
+    """Fetch YouTube metadata + available resolutions without downloading."""
+    if YoutubeDL is None:
+        raise RuntimeError("yt-dlp is not installed")
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "noplaylist": True,
+    }
+    with YoutubeDL(options) as ydl:
+        info = ydl.extract_info(url, download=False)
+    heights = sorted(
+        {int(f["height"]) for f in info.get("formats", []) if f.get("height")}
+    )
+    logger.info(
+        f"fetched youtube info: {info.get('title', '')!r}, "
+        f"duration={info.get('duration', 0)}s, heights={heights}"
+    )
+    return {
+        "title": str(info.get("title") or ""),
+        "duration": float(info.get("duration") or 0),
+        "heights": heights,
+    }
+
+
 def download_youtube(url: str, output_path: str, max_height: int = 0) -> str:
     """Download a YouTube video to ``output_path`` (extension auto-appended).
 
