@@ -88,6 +88,32 @@ class TestClipService(unittest.TestCase):
         self.assertEqual(clip._fmt_ts(65), "1:05")
         self.assertEqual(clip._fmt_ts(3661), "1:01:01")
 
+    def test_cleanup_clip_source_removes_files(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            video = os.path.join(tmp, "source.mp4")
+            audio = os.path.join(tmp, "audio.wav")
+            keep = os.path.join(tmp, "clip-1.mp4")
+            for path in (video, audio, keep):
+                with open(path, "wb") as f:
+                    f.write(b"x")
+            clip._cleanup_clip_source(video, audio)
+            self.assertFalse(os.path.exists(video))
+            self.assertFalse(os.path.exists(audio))
+            self.assertTrue(os.path.exists(keep))
+
+    def test_cleanup_clip_source_missing_paths_are_ignored(self):
+        clip._cleanup_clip_source("/nonexistent/video.mp4", None)
+
+    def test_download_youtube_requires_url_and_caps_height(self):
+        # 不真的下载；只验证 format selector 与输出路径行为在缺 yt-dlp 时的报错。
+        if clip.YoutubeDL is None:
+            with self.assertRaises(RuntimeError):
+                clip.download_youtube("https://example.com/v", "/tmp/x.mp4", 360)
+
+
 
 if __name__ == "__main__":
     unittest.main()

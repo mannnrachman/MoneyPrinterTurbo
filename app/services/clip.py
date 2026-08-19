@@ -16,6 +16,11 @@ import subprocess
 
 from loguru import logger
 
+try:
+    from yt_dlp import YoutubeDL
+except ImportError:
+    YoutubeDL = None
+
 from app.models import const
 from app.services import llm, state as sm, subtitle
 from app.services import task as tm
@@ -271,6 +276,53 @@ def _render_clip(video_path: str, start: float, end: float, output_path: str) ->
         )
 
 
+def download_youtube(url: str, output_path: str, max_height: int = 0) -> str:
+    """Download a YouTube video to ``output_path`` (extension auto-appended).
+
+    ``max_height`` caps the resolution (0 = best available). Returns the real
+    file path written by yt-dlp.
+    """
+    if YoutubeDL is None:
+        raise RuntimeError("yt-dlp is not installed")
+    if max_height and max_height > 0:
+        format_selector = (
+            f"bestvideo[height<={max_height}]+bestaudio/"
+            f"best[height<={max_height}]"
+        )
+    else:
+        format_selector = "bestvideo+bestaudio/best"
+
+    output_dir = os.path.dirname(output_path) or "."
+    output_stem = os.path.splitext(os.path.basename(output_path))[0]
+    options = {
+        "format": format_selector,
+        "outtmpl": os.path.join(output_dir, f"{output_stem}.%(ext)s"),
+        "noplaylist": True,
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+    }
+    logger.info(
+        f"downloading youtube video: {url}, max_height: {max_height or 'best'}"
+    )
+    with YoutubeDL(options) as ydl:
+        info = ydl.extract_info(url, download=True)
+        downloaded = ydl.prepare_filename(info)
+    if not os.path.isfile(downloaded):
+        # merged formats may end up with a different extension than prepared
+        candidates = sorted(
+            os.path.join(output_dir, name)
+            for name in os.listdir(output_dir)
+            if name.startswith(output_stem)
+        )
+        if not candidates:
+            raise RuntimeError(f"yt-dlp finished but no output file found: {url}")
+        downloaded = candidates[-1]
+    logger.success(f"youtube video downloaded: {downloaded}")
+    return downloaded
+
+
 def generate_clips(
     task_id: str,
     video_path: str,
@@ -360,6 +412,7 @@ def generate_clips(
         logger.success(
             f"task {task_id} finished, generated {len(clip_paths)} clips."
         )
+        _cleanup_clip_source(video_path, audio_path)
         return {"clips": clip_paths}
     except Exception as exc:
         logger.exception(f"clip task failed, task_id: {task_id}, error: {exc}")
@@ -369,3 +422,18 @@ def generate_clips(
             f"{type(exc).__name__}: {exc}",
             details=task_metadata,
         )
+
+
+def _cleanup_clip_source(video_path: str, audio_path: str) -> None:
+    """Delete the source video and extracted audio once clips are done.
+
+    The clips are already rendered, so keeping the originals only wastes disk.
+    Files are best-effort deleted so a locked file never fails the task.
+    """
+    for path in (video_path, audio_path):
+        try:
+            if path and os.path.isfile(path):
+                os.remove(path)
+                logger.debug(f"cleaned up clip source: {path}")
+        except OSError:
+            logger.warning(f"could not remove clip source: {path}")

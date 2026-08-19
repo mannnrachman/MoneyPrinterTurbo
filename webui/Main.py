@@ -45,6 +45,7 @@ from app.models.schema import (
 from app.services import bgm as bgm_service
 from app.services import (
     cache_manager,
+    clip as clip_service,
     llm,
     loomloom,
     subtitle,
@@ -681,7 +682,12 @@ def _prepare_clip_task():
     task_id = str(uuid4())
     st.session_state["pending_clip_task_id"] = task_id
     uploaded = st.session_state.get("clip_source_uploader")
-    subject = getattr(uploaded, "name", "") or task_id
+    clip_url = st.session_state.get("clip_url_input", "") or ""
+    subject = (
+        clip_url.strip()
+        or getattr(uploaded, "name", "")
+        or task_id
+    )
     _add_active_generation_task(task_id, subject=subject)
 
 
@@ -1716,6 +1722,42 @@ def _render_clip_generation():
         key="clip_source_uploader",
         help=tr("Upload Long Video Help"),
     )
+    clip_url = st.text_input(
+        tr("Clip YouTube URL"),
+        key="clip_url_input",
+        placeholder=tr("Clip YouTube URL Placeholder"),
+        help=tr("Clip YouTube URL Help"),
+    )
+    url_cols = st.columns([1, 2])
+    with url_cols[0]:
+        resolution_options = [
+            (tr("Resolution Auto"), 0),
+            (tr("Resolution 360p"), 360),
+            (tr("Resolution 480p"), 480),
+            (tr("Resolution 720p"), 720),
+            (tr("Resolution 1080p"), 1080),
+            (tr("Resolution 1440p"), 1440),
+            (tr("Resolution 4K"), 2160),
+        ]
+        saved_resolution = int(config.ui.get("clip_resolution", 0) or 0)
+        resolution_index = 0
+        for i, (_, res) in enumerate(resolution_options):
+            if res == saved_resolution:
+                resolution_index = i
+                break
+        selected_resolution = st.selectbox(
+            tr("Clip Resolution"),
+            options=[value for _, value in resolution_options],
+            index=resolution_index,
+            key="clip_resolution_select",
+            format_func=lambda value: dict(
+                (v, label) for label, v in resolution_options
+            )[value],
+            help=tr("Clip Resolution Help"),
+        )
+    with url_cols[1]:
+        st.caption(tr("Clip Resolution Note"))
+
     settings_cols = st.columns(3)
     with settings_cols[0]:
         clip_count = st.number_input(
@@ -1772,23 +1814,37 @@ def _render_clip_generation():
         use_container_width=True,
         key="generate_clips_button",
         on_click=_prepare_clip_task,
-        disabled=uploaded_file is None,
+        disabled=uploaded_file is None and not clip_url.strip(),
     )
     if submit:
         task_id = st.session_state.get("pending_clip_task_id") or str(uuid4())
         task_dir = utils.task_dir(task_id)
         try:
-            source_path = _build_uploaded_file_path(
-                uploaded_file,
-                task_dir,
-                CLIP_SOURCE_EXTENSIONS,
-                "source",
-            )
-            with open(source_path, "wb") as target:
-                target.write(uploaded_file.getbuffer())
+            source_path = None
+            if clip_url.strip():
+                max_height = int(selected_resolution or 0)
+                source_path = clip_service.download_youtube(
+                    clip_url.strip(),
+                    os.path.join(task_dir, "source.mp4"),
+                    max_height=max_height,
+                )
+                subject = clip_url.strip()
+            elif uploaded_file is not None:
+                source_path = _build_uploaded_file_path(
+                    uploaded_file,
+                    task_dir,
+                    CLIP_SOURCE_EXTENSIONS,
+                    "source",
+                )
+                with open(source_path, "wb") as target:
+                    target.write(uploaded_file.getbuffer())
+                subject = uploaded_file.name
+            else:
+                raise ValueError("no clip source provided")
             _set_runtime_config("ui", "clip_count", int(clip_count))
             _set_runtime_config("ui", "clip_duration", int(clip_duration))
             _set_runtime_config("ui", "clip_prompt", clip_prompt)
+            _set_runtime_config("ui", "clip_resolution", int(selected_resolution or 0))
             _save_runtime_config()
             webui_task.submit_clip_generation(
                 task_id=task_id,
@@ -1796,7 +1852,7 @@ def _render_clip_generation():
                 clip_count=int(clip_count),
                 clip_duration=int(clip_duration),
                 clip_prompt=clip_prompt,
-                subject=uploaded_file.name,
+                subject=subject,
                 capture_logs=not config.ui.get("hide_log", False),
             )
             st.session_state["current_clip_task_id"] = task_id
@@ -1806,7 +1862,7 @@ def _render_clip_generation():
             _remove_active_generation_task(task_id)
             shutil.rmtree(task_dir, ignore_errors=True)
             logger.exception(f"failed to submit WebUI clip task: {exc}")
-            st.error(tr("Clip Generation Failed"))
+            st.error(f"{tr('Clip Generation Failed')}: {exc}")
     _render_current_clip_task()
 
 
