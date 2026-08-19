@@ -2087,9 +2087,121 @@ def _render_clip_preview(
         st.error(f"{tr('Preview Clips Failed')}: {exc}")
 
 
+def _clip_player_html(media_url: str, segments: list[dict], labels: dict) -> str:
+    """Build an HTML5 video player with CapCut-like play/zoom/segment-jump."""
+    seg_json = []
+    for seg in segments:
+        seg_json.append(
+            f"{{\"start\": {float(seg.get('start', 0)):.1f}, "
+            f"\"end\": {float(seg.get('end', 0)):.1f}}}"
+        )
+    zoom_in = labels.get("zoom_in", "+")
+    zoom_out = labels.get("zoom_out", "\u2212")
+    zoom_reset = labels.get("zoom_reset", "1:1")
+    jump_label = labels.get("jump", "\u25b6 segment")
+    return f"""
+<div style="font-family: sans-serif; max-width: 100%;">
+  <style>
+    #clipvwrap {{ position: relative; width: 100%; overflow: auto; background: #000; }}
+    #clipv {{ display: block; width: 100%; transform-origin: center top; transition: transform .15s ease; }}
+    .cbtn {{ margin: 2px 4px 2px 0; padding: 3px 10px; cursor: pointer;
+             border: 1px solid #888; border-radius: 4px; background: #fff; }}
+    .zoombar {{ display: flex; align-items: center; gap: 4px; padding: 4px 0; }}
+    .segs {{ display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 0; }}
+    .segb {{ display: inline-block; padding: 2px 8px; border-radius: 4px; cursor: pointer;
+             border: 1px solid #ff4b4b; color: #ff4b4b; background: #fff; font-size: 12px; }}
+    .segb.on {{ background: #ff4b4b; color: #fff; }}
+  </style>
+  <div id="clipvwrap"><video id="clipv" controls preload="metadata"
+         src="{media_url}" style="width:100%"></video></div>
+  <div class="zoombar">
+    <button class="cbtn" onclick="zoomBy(-0.25)">{zoom_out}</button>
+    <button class="cbtn" onclick="zoomBy(0.25)">{zoom_in}</button>
+    <button class="cbtn" onclick="zoomReset()">{zoom_reset}</button>
+    <span id="cliptime" style="margin-left:auto; font-size:12px; color:#666">0:00</span>
+  </div>
+  <div class="segs" id="clipsegs">
+    <button class="segb" onclick="seekTo(0)">&#9654; 0:00</button>
+    {{seg_buttons}}
+  </div>
+  <script>
+    var v = document.getElementById('clipv');
+    var zoom = 1;
+    function zoomBy(d) {{ zoom = Math.min(3, Math.max(0.5, zoom + d)); v.style.transform = 'scale(' + zoom + ')'; }}
+    function zoomReset() {{ zoom = 1; v.style.transform = 'scale(1)'; }}
+    function seekTo(t) {{ if (v) {{ v.currentTime = t; v.play(); }} }}
+    var tm = document.getElementById('cliptime');
+    v.addEventListener('timeupdate', function() {{
+      var m = Math.floor(v.currentTime / 60), s = Math.floor(v.currentTime % 60);
+      tm.textContent = m + ':' + (s < 10 ? '0' : '') + s;
+      var segs = document.querySelectorAll('.segb[data-start]');
+      for (var i = 0; i < segs.length; i++) {{
+        var a = parseFloat(segs[i].getAttribute('data-start'));
+        var b = parseFloat(segs[i].getAttribute('data-end'));
+        segs[i].classList.toggle('on', v.currentTime >= a && v.currentTime <= b);
+      }}
+    }});
+  </script>
+</div>
+""".replace("{{seg_buttons}}", _clip_seg_buttons(segments, jump_label, _fmt_seg_label))
+
+
+def _clip_seg_buttons(segments, jump_label, fmt):
+    parts = []
+    for seg in segments:
+        start = float(seg.get("start", 0))
+        end = float(seg.get("end", 0))
+        parts.append(
+            f'<button class="segb" data-start="{start:.1f}" data-end="{end:.1f}" '
+            f'onclick="seekTo({start:.1f})" title="{jump_label}">'
+            f"{fmt(start, end)}</button>"
+        )
+    return "\n    ".join(parts)
+
+
+def _fmt_seg_label(start: float, end: float) -> str:
+    def ts(value: float) -> str:
+        m = int(value // 60)
+        s = int(value % 60)
+        return f"{m}:{s:02d}"
+
+    return f"{ts(start)}-{ts(end)}"
+
+
+def _render_clip_video_player(source_path: str, segments):
+    """Embed an HTML5 player (play, zoom, jump-to-segment) for the source video."""
+    if not segments or not os.path.isfile(source_path):
+        return
+    media_url = None
+    try:
+        from streamlit.runtime import get_instance
+
+        media_url = get_instance().media_file_mgr.add(
+            source_path, "video/mp4", coordinates="clip-preview"
+        )
+    except Exception:
+        logger.debug("media_file_mgr unavailable for clip preview", exc_info=True)
+    if not media_url:
+        st.caption(tr("Clip Player Unavailable"))
+        return
+    html = _clip_player_html(
+        media_url,
+        segments,
+        labels={
+            "zoom_in": tr("Zoom In"),
+            "zoom_out": tr("Zoom Out"),
+            "zoom_reset": tr("Zoom Reset"),
+            "jump": tr("Jump To Segment"),
+        },
+    )
+    st.iframe(html, height=330, width="stretch")
+
+
 def _render_clip_segment_editor(segments):
     """Render each segment as trim + delete controls (ranges are committed on rerun)."""
     total = float(st.session_state.get("clip_preview_total_duration", 0) or 0)
+    source = st.session_state.get("clip_preview_source", "") or ""
+    _render_clip_video_player(source, segments)
     st.markdown(f"**{tr('Clip Segments')}** ({len(segments)})")
     st.caption(tr("Clip Segments Help"))
     for i, seg in enumerate(segments):
