@@ -16,16 +16,55 @@
       body { color: #ddd; }
     }
     .editor { width: 100%; }
+    .preview-controls {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 0 0 6px;
+    }
+    .preview-controls button {
+      min-width: 32px;
+      height: 26px;
+      padding: 2px 9px;
+      border: 1px solid #999;
+      border-radius: 4px;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .preview-controls button:hover { border-color: #ff4b4b; color: #ff4b4b; }
+    #preview-size {
+      width: 140px;
+      accent-color: #ff4b4b;
+      cursor: pointer;
+    }
+    #preview-scale {
+      min-width: 42px;
+      color: #777;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      text-align: center;
+    }
     .preview-row {
       display: flex;
       justify-content: center;
       min-height: 0;
+      max-height: 380px;
+      overflow: auto;
       padding-bottom: 6px;
+    }
+    #preview-stage {
+      display: flex;
+      justify-content: center;
+      min-width: 100%;
     }
     #video {
       display: block;
-      width: min(320px, 100%);
-      max-height: 180px;
+      width: 480px;
+      max-width: none;
+      max-height: 300px;
       border-radius: 6px;
       background: #000;
       object-fit: contain;
@@ -191,7 +230,14 @@
 </head>
 <body>
   <div class="editor">
-    <div class="preview-row"><video id="video" controls preload="metadata"></video></div>
+    <div class="preview-controls">
+      <button id="preview-out" type="button" aria-label="Make video preview smaller">−</button>
+      <input id="preview-size" type="range" min="50" max="200" step="10" value="100" aria-label="Video preview size">
+      <button id="preview-in" type="button" aria-label="Make video preview larger">+</button>
+      <button id="preview-fit" type="button" aria-label="Reset video preview size">Fit</button>
+      <span id="preview-scale">100%</span>
+    </div>
+    <div class="preview-row"><div id="preview-stage"><video id="video" controls preload="metadata"></video></div></div>
     <div class="toolbar">
       <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
       <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
@@ -221,6 +267,12 @@
     const playhead = document.getElementById("playhead");
     const timeReadout = document.getElementById("time-readout");
     const dragReadout = document.getElementById("drag-readout");
+    const previewStage = document.getElementById("preview-stage");
+    const previewSize = document.getElementById("preview-size");
+    const previewScale = document.getElementById("preview-scale");
+    const PREVIEW_BASE_WIDTH = 480;
+    const PREVIEW_BASE_HEIGHT = 300;
+    const previewState = {scale: 1};
 
     const state = {
       duration: 0,
@@ -256,6 +308,15 @@
       });
     }
     function clamp(value, low, high) { return Math.max(low, Math.min(high, value)); }
+    function setPreviewScale(value) {
+      previewState.scale = clamp(Number(value) || 1, 0.5, 2);
+      const width = PREVIEW_BASE_WIDTH * previewState.scale;
+      video.style.width = `${width}px`;
+      video.style.maxHeight = `${PREVIEW_BASE_HEIGHT * previewState.scale}px`;
+      previewStage.style.width = `${width}px`;
+      previewSize.value = String(Math.round(previewState.scale * 100));
+      previewScale.textContent = `${Math.round(previewState.scale * 100)}%`;
+    }
     function roundTime(value) { return Math.round(value * 10) / 10; }
     function formatTime(value) {
       value = Math.max(0, Number(value) || 0);
@@ -433,6 +494,11 @@
       if (event.target.closest(".segment")) return;
       setPlayerTime(timeFromClientX(event.clientX), false);
     });
+    document.getElementById("preview-out").addEventListener("click", () => setPreviewScale(previewState.scale - 0.1));
+    document.getElementById("preview-in").addEventListener("click", () => setPreviewScale(previewState.scale + 0.1));
+    document.getElementById("preview-fit").addEventListener("click", () => setPreviewScale(1));
+    previewSize.addEventListener("input", () => setPreviewScale(Number(previewSize.value) / 100));
+    setPreviewScale(1);
     document.getElementById("zoom-out").addEventListener("click", () => setScale(1 / 1.5));
     document.getElementById("zoom-in").addEventListener("click", () => setScale(1.5));
     document.getElementById("zoom-fit").addEventListener("click", fitTimeline);
