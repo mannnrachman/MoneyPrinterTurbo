@@ -13,6 +13,8 @@ import math
 import os
 import re
 import subprocess
+import wave
+from array import array
 
 from loguru import logger
 
@@ -105,6 +107,32 @@ def _extract_audio(video_path: str, audio_path: str) -> None:
             (result.stderr or result.stdout or "").strip() or "ffmpeg audio extraction failed"
         )
 
+
+def _build_waveform(audio_path: str, max_bars: int = 12000) -> list[float]:
+    """Reduce a mono PCM WAV to normalized peak bars for the editor timeline."""
+    with wave.open(audio_path, "rb") as source:
+        sample_width = source.getsampwidth()
+        frame_count = source.getnframes()
+        if sample_width != 2 or frame_count <= 0:
+            return []
+
+        target_bars = max(
+            600,
+            min(max_bars, int(frame_count / source.getframerate() * 20)),
+        )
+        frames_per_bar = max(1, math.ceil(frame_count / target_bars))
+        waveform = []
+        peak_limit = float(1 << (sample_width * 8 - 1))
+        while True:
+            raw = source.readframes(frames_per_bar)
+            if not raw:
+                break
+            samples = array("h")
+            samples.frombytes(raw)
+            if samples:
+                peak = max(abs(sample) for sample in samples)
+                waveform.append(min(1.0, peak / peak_limit))
+        return waveform
 
 def _build_windows(segments: list[dict], target_duration: float) -> list[dict]:
     """Group sentence segments into consecutive windows of ~target duration."""
@@ -447,8 +475,13 @@ def preview_windows(
     count = _normalize_clip_count(clip_count)
     audio_path = f"{video_path}.preview.wav"
     _extract_audio(video_path, audio_path)
+    waveform = []
     try:
         segments = subtitle.transcribe_segments(audio_path, use_vad=_clip_use_vad())
+        try:
+            waveform = _build_waveform(audio_path)
+        except (OSError, wave.Error):
+            logger.warning(f"could not build preview waveform: {audio_path}")
     finally:
         _remove_file(audio_path)
     windows = []
@@ -458,7 +491,11 @@ def preview_windows(
             windows = _expand_windows_to_count(
                 segments, windows, duration, count
             )
-    return {"windows": windows, "total_duration": _probe_duration(video_path)}
+    return {
+        "windows": windows,
+        "total_duration": _probe_duration(video_path),
+        "waveform": waveform,
+    }
 
 
 def _probe_duration(video_path: str) -> float:

@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 8px 2px 4px;
+      overflow: hidden;
+      color: #444;
+      font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      body { color: #ddd; }
+    }
+    .editor { width: 100%; }
+    .preview-row {
+      display: flex;
+      justify-content: center;
+      min-height: 0;
+      padding-bottom: 6px;
+    }
+    #video {
+      display: block;
+      width: min(320px, 100%);
+      max-height: 180px;
+      border-radius: 6px;
+      background: #000;
+      object-fit: contain;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 2px 0 6px;
+    }
+    .toolbar button {
+      min-width: 32px;
+      height: 26px;
+      padding: 2px 9px;
+      border: 1px solid #999;
+      border-radius: 4px;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .toolbar button:hover { border-color: #ff4b4b; color: #ff4b4b; }
+    #time-readout {
+      margin-left: auto;
+      min-width: 116px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      color: #777;
+    }
+    #timeline-scroll {
+      width: 100%;
+      overflow-x: auto;
+      overflow-y: hidden;
+      border: 1px solid #aaa;
+      border-radius: 5px;
+      background: color-mix(in srgb, currentColor 5%, transparent);
+      cursor: crosshair;
+      scrollbar-width: thin;
+    }
+    #timeline {
+      position: relative;
+      min-width: 100%;
+      height: 166px;
+      user-select: none;
+      touch-action: pan-x;
+    }
+    #ruler {
+      position: absolute;
+      top: 0;
+      left: 0;
+      height: 28px;
+      border-bottom: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+      pointer-events: none;
+    }
+    .tick {
+      position: absolute;
+      top: 0;
+      height: 27px;
+      border-left: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+      padding: 3px 0 0 3px;
+      color: #777;
+      font-size: 10px;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    .tick.major {
+      border-left-color: color-mix(in srgb, currentColor 55%, transparent);
+      font-weight: 600;
+    }
+    #waveform {
+      position: absolute;
+      top: 32px;
+      left: 0;
+      height: 65px;
+      pointer-events: none;
+      opacity: .88;
+    }
+    #track {
+      position: absolute;
+      top: 106px;
+      left: 0;
+      height: 42px;
+      border-radius: 4px;
+      background: color-mix(in srgb, currentColor 6%, transparent);
+      pointer-events: none;
+    }
+    .segment {
+      position: absolute;
+      top: 3px;
+      height: 36px;
+      min-width: 10px;
+      border: 2px solid #ff4b4b;
+      border-radius: 4px;
+      background: color-mix(in srgb, #ff4b4b 28%, transparent);
+      pointer-events: auto;
+      cursor: grab;
+    }
+    .segment.selected {
+      border-color: #ff8b00;
+      background: color-mix(in srgb, #ff8b00 35%, transparent);
+      box-shadow: 0 0 0 1px color-mix(in srgb, #ff8b00 55%, transparent);
+    }
+    .segment:active { cursor: grabbing; }
+    .segment-label {
+      display: block;
+      overflow: hidden;
+      padding: 8px 20px;
+      color: inherit;
+      font-size: 11px;
+      text-align: center;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      pointer-events: none;
+      font-variant-numeric: tabular-nums;
+    }
+    .handle {
+      position: absolute;
+      top: -2px;
+      z-index: 2;
+      width: 11px;
+      height: 36px;
+      border: 0;
+      background: #ff4b4b;
+      cursor: ew-resize;
+      touch-action: none;
+    }
+    .handle.left { left: -2px; border-radius: 3px 0 0 3px; }
+    .handle.right { right: -2px; border-radius: 0 3px 3px 0; }
+    .segment.selected .handle { background: #ff8b00; }
+    #playhead {
+      position: absolute;
+      top: 0;
+      z-index: 5;
+      width: 2px;
+      height: 148px;
+      background: #1976d2;
+      pointer-events: none;
+    }
+    #playhead::before {
+      position: absolute;
+      top: 0;
+      left: -5px;
+      width: 0;
+      height: 0;
+      border-right: 6px solid transparent;
+      border-left: 6px solid transparent;
+      border-top: 8px solid #1976d2;
+      content: "";
+    }
+    #drag-readout {
+      min-height: 17px;
+      padding-top: 3px;
+      color: #ff4b4b;
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+    .hint {
+      padding-top: 2px;
+      color: #777;
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <div class="editor">
+    <div class="preview-row"><video id="video" controls preload="metadata"></video></div>
+    <div class="toolbar">
+      <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+      <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+      <button id="zoom-fit" type="button" aria-label="Fit timeline">Fit</button>
+      <span id="time-readout">0:00 / 0:00</span>
+    </div>
+    <div id="timeline-scroll">
+      <div id="timeline">
+        <div id="ruler"></div>
+        <canvas id="waveform"></canvas>
+        <div id="track"></div>
+        <div id="segments"></div>
+        <div id="playhead"></div>
+      </div>
+    </div>
+    <div id="drag-readout"></div>
+    <div id="timeline-hint" class="hint">Drag either red handle to set the exact start/end time. Click the waveform to seek.</div>
+  </div>
+  <script>
+    const video = document.getElementById("video");
+    const timeline = document.getElementById("timeline");
+    const timelineScroll = document.getElementById("timeline-scroll");
+    const ruler = document.getElementById("ruler");
+    const waveform = document.getElementById("waveform");
+    const track = document.getElementById("track");
+    const segmentLayer = document.getElementById("segments");
+    const playhead = document.getElementById("playhead");
+    const timeReadout = document.getElementById("time-readout");
+    const dragReadout = document.getElementById("drag-readout");
+
+    const state = {
+      duration: 0,
+      waveform: [],
+      segments: [],
+      revision: 0,
+      scale: 8,
+      source: "",
+      initialized: false,
+      selected: 0,
+      drag: null,
+    };
+    const MIN_SCALE = 0.8;
+    const MAX_SCALE = 80;
+    const MIN_SEGMENT_SECONDS = 0.1;
+
+    function sendMessage(type, data) {
+      window.parent.postMessage(Object.assign({isStreamlitMessage: true, type}, data || {}), "*");
+    }
+    function init() {
+      sendMessage("streamlit:componentReady", {apiVersion: 1});
+      sendMessage("streamlit:setFrameHeight", {height: 425});
+    }
+    function sendData() {
+      sendMessage("streamlit:setComponentValue", {
+        revision: state.revision,
+        dataType: "json",
+        windows: state.segments.map((segment) => ({
+          start: Number(segment.start.toFixed(1)),
+          end: Number(segment.end.toFixed(1)),
+          text: segment.text || "",
+        })),
+      });
+    }
+    function clamp(value, low, high) { return Math.max(low, Math.min(high, value)); }
+    function roundTime(value) { return Math.round(value * 10) / 10; }
+    function formatTime(value) {
+      value = Math.max(0, Number(value) || 0);
+      const hours = Math.floor(value / 3600);
+      const minutes = Math.floor((value % 3600) / 60);
+      const seconds = Math.floor(value % 60);
+      if (hours) return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+      return `${minutes}:${String(seconds).padStart(2, "0")}`;
+    }
+    function formatTick(value, step) {
+      if (step < 1) return `${value.toFixed(1)}s`;
+      return formatTime(value);
+    }
+    function chooseTickStep() {
+      const options = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
+      return options.find((step) => step * state.scale >= 55) || options[options.length - 1];
+    }
+    function contentWidth() {
+      return Math.max(100, state.duration * state.scale + 12);
+    }
+    function fitTimeline() {
+      if (!state.duration) return;
+      state.scale = clamp((timelineScroll.clientWidth - 12) / state.duration, MIN_SCALE, MAX_SCALE);
+      renderTimeline();
+    }
+    function setScale(multiplier) {
+      const center = timelineScroll.scrollLeft + timelineScroll.clientWidth / 2;
+      const anchorTime = state.scale ? center / state.scale : 0;
+      state.scale = clamp(state.scale * multiplier, MIN_SCALE, MAX_SCALE);
+      renderTimeline();
+      timelineScroll.scrollLeft = Math.max(0, anchorTime * state.scale - timelineScroll.clientWidth / 2);
+    }
+    function timeFromClientX(clientX) {
+      const rect = timeline.getBoundingClientRect();
+      return clamp((clientX - rect.left) / state.scale, 0, state.duration);
+    }
+    function setPlayerTime(value, play) {
+      const time = clamp(Number(value) || 0, 0, state.duration);
+      if (Number.isFinite(video.duration)) video.currentTime = time;
+      if (play) video.play().catch(() => {});
+      renderPlayhead(time);
+    }
+    function renderPlayhead(time) {
+      playhead.style.left = `${clamp(time, 0, state.duration) * state.scale}px`;
+      timeReadout.textContent = `${formatTime(time)} / ${formatTime(state.duration)}`;
+    }
+    function renderRuler(width) {
+      ruler.replaceChildren();
+      ruler.style.width = `${width}px`;
+      if (!state.duration) return;
+      const step = chooseTickStep();
+      for (let value = 0; value <= state.duration + step / 2; value += step) {
+        const tick = document.createElement("span");
+        tick.className = `tick${Math.round(value / step) % 5 === 0 ? " major" : ""}`;
+        tick.style.left = `${value * state.scale}px`;
+        tick.textContent = formatTick(Math.min(value, state.duration), step);
+        ruler.appendChild(tick);
+      }
+    }
+    function renderWaveform(width) {
+      waveform.style.width = `${width}px`;
+      waveform.width = Math.max(1, Math.floor(width * devicePixelRatio));
+      waveform.height = Math.max(1, Math.floor(65 * devicePixelRatio));
+      const ctx = waveform.getContext("2d");
+      ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+      ctx.clearRect(0, 0, width, 65);
+      ctx.fillStyle = "rgba(80, 150, 210, .72)";
+      const bars = state.waveform;
+      if (!bars.length) {
+        ctx.fillStyle = "rgba(120, 120, 120, .35)";
+        ctx.fillRect(0, 31, width, 1);
+        return;
+      }
+      const barWidth = width / bars.length;
+      bars.forEach((peak, index) => {
+        const height = Math.max(1, Math.min(60, Number(peak) * 60));
+        ctx.fillRect(index * barWidth, (65 - height) / 2, Math.max(1, barWidth * .72), height);
+      });
+    }
+    function segmentLanes() {
+      const laneEnds = [];
+      return state.segments.map((segment) => {
+        let lane = laneEnds.findIndex((end) => end <= segment.start);
+        if (lane < 0) lane = laneEnds.length;
+        laneEnds[lane] = segment.end;
+        return lane;
+      });
+    }
+    function resizeTimeline(laneCount) {
+      const timelineHeight = 106 + Math.max(1, laneCount) * 42;
+      timeline.style.height = `${timelineHeight}px`;
+      track.style.height = `${Math.max(1, laneCount) * 42}px`;
+      playhead.style.height = `${timelineHeight - 18}px`;
+      sendMessage("streamlit:setFrameHeight", {height: 270 + timelineHeight});
+    }
+    function renderSegments(width) {
+      segmentLayer.replaceChildren();
+      segmentLayer.style.position = "absolute";
+      segmentLayer.style.left = "0";
+      segmentLayer.style.top = "106px";
+      segmentLayer.style.width = `${width}px`;
+      const lanes = segmentLanes();
+      const laneCount = Math.max(1, ...lanes.map((lane) => lane + 1));
+      segmentLayer.style.height = `${laneCount * 42}px`;
+      resizeTimeline(laneCount);
+      state.segments.forEach((segment, index) => {
+        const item = document.createElement("div");
+        item.className = `segment${index === state.selected ? " selected" : ""}`;
+        item.style.top = `${lanes[index] * 42 + 3}px`;
+        item.style.left = `${segment.start * state.scale}px`;
+        item.style.width = `${Math.max(10, (segment.end - segment.start) * state.scale)}px`;
+        item.title = `#${index + 1}: ${formatTime(segment.start)} - ${formatTime(segment.end)}`;
+        item.addEventListener("pointerdown", (event) => {
+          if (event.target.classList.contains("handle")) return;
+          state.selected = index;
+          renderSegments(width);
+          event.stopPropagation();
+        });
+        const label = document.createElement("span");
+        label.className = "segment-label";
+        label.textContent = `#${index + 1}  ${formatTime(segment.start)}–${formatTime(segment.end)}`;
+        item.appendChild(label);
+        ["left", "right"].forEach((side) => {
+          const handle = document.createElement("button");
+          handle.className = `handle ${side}`;
+          handle.type = "button";
+          handle.setAttribute("aria-label", `${side} trim handle for segment ${index + 1}`);
+          handle.addEventListener("pointerdown", (event) => startHandleDrag(event, index, side));
+          item.appendChild(handle);
+        });
+        segmentLayer.appendChild(item);
+      });
+    }
+    function renderTimeline() {
+      const width = contentWidth();
+      const mediaWidth = Math.max(1, state.duration * state.scale);
+      timeline.style.width = `${width}px`;
+      timeline.style.minWidth = `${width}px`;
+      track.style.width = `${mediaWidth}px`;
+      renderRuler(width);
+      renderWaveform(mediaWidth);
+      renderSegments(mediaWidth);
+      renderPlayhead(Number.isFinite(video.currentTime) ? video.currentTime : 0);
+    }
+    function startHandleDrag(event, index, side) {
+      event.preventDefault();
+      event.stopPropagation();
+      state.selected = index;
+      state.drag = {index, side};
+      dragReadout.textContent = `Segment ${index + 1}: ${formatTime(state.segments[index].start)} – ${formatTime(state.segments[index].end)}`;
+      document.addEventListener("pointermove", handleDragMove);
+      document.addEventListener("pointerup", finishHandleDrag, {once: true});
+    }
+    function handleDragMove(event) {
+      if (!state.drag) return;
+      const segment = state.segments[state.drag.index];
+      if (!segment) return;
+      const time = roundTime(timeFromClientX(event.clientX));
+      if (state.drag.side === "left") {
+        segment.start = clamp(time, 0, segment.end - MIN_SEGMENT_SECONDS);
+      } else {
+        segment.end = clamp(time, segment.start + MIN_SEGMENT_SECONDS, state.duration);
+      }
+      dragReadout.textContent = `Segment ${state.drag.index + 1}: ${formatTime(segment.start)} – ${formatTime(segment.end)}  (${(segment.end - segment.start).toFixed(1)}s)`;
+      renderSegments(Math.max(1, state.duration * state.scale));
+    }
+    function finishHandleDrag() {
+      document.removeEventListener("pointermove", handleDragMove);
+      if (!state.drag) return;
+      state.drag = null;
+      sendData();
+      window.setTimeout(() => { dragReadout.textContent = ""; }, 1200);
+    }
+    timeline.addEventListener("pointerdown", (event) => {
+      if (event.target.closest(".segment")) return;
+      setPlayerTime(timeFromClientX(event.clientX), false);
+    });
+    document.getElementById("zoom-out").addEventListener("click", () => setScale(1 / 1.5));
+    document.getElementById("zoom-in").addEventListener("click", () => setScale(1.5));
+    document.getElementById("zoom-fit").addEventListener("click", fitTimeline);
+    video.addEventListener("timeupdate", () => renderPlayhead(video.currentTime));
+    video.addEventListener("loadedmetadata", () => {
+      if (!state.duration && Number.isFinite(video.duration)) {
+        state.duration = video.duration;
+        renderTimeline();
+      }
+    });
+    window.addEventListener("message", (event) => {
+      if (!event.data || event.data.type !== "streamlit:render") return;
+      const args = event.data.args || {};
+      const incomingRevision = Number(args.revision || 0);
+      const source = String(args.video_url || "");
+      const sourceChanged = source !== state.source;
+      const revisionChanged = incomingRevision !== state.revision;
+      const incomingDuration = Math.max(0, Number(args.duration) || 0);
+      const incomingWaveform = Array.isArray(args.waveform) ? args.waveform : [];
+      const labels = args.labels || {};
+      document.getElementById("zoom-out").textContent = labels.zoom_out || "−";
+      document.getElementById("zoom-in").textContent = labels.zoom_in || "+";
+      document.getElementById("zoom-fit").textContent = labels.fit || "Fit";
+      document.getElementById("timeline-hint").textContent = labels.hint || "Drag either red handle to set the exact start/end time. Click the waveform to seek.";
+      state.duration = incomingDuration;
+      state.waveform = incomingWaveform;
+      if (!state.initialized || sourceChanged || revisionChanged) {
+        state.segments = (Array.isArray(args.segments) ? args.segments : []).map((segment) => ({
+          start: clamp(Number(segment.start) || 0, 0, state.duration),
+          end: clamp(Number(segment.end) || 0, 0, state.duration),
+          text: String(segment.text || ""),
+        })).filter((segment) => segment.end > segment.start);
+        state.revision = incomingRevision;
+        state.source = source;
+        state.selected = Math.min(state.selected, Math.max(0, state.segments.length - 1));
+        if (sourceChanged) video.src = source;
+      }
+      if (!state.initialized) {
+        state.initialized = true;
+        window.requestAnimationFrame(fitTimeline);
+      } else {
+        renderTimeline();
+      }
+    });
+    init();
+  </script>
+</body>
+</html>

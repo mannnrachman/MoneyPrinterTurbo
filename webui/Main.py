@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 import requests
 import streamlit as st
 from loguru import logger
+from streamlit.components.v1 import declare_component
 from streamlit_tour import Tour
 
 # WebUI 作为独立入口运行时，需要让项目根目录优先于第三方依赖，
@@ -129,6 +130,10 @@ LOCAL_MATERIAL_EXTENSIONS = {
 }
 CLIP_SOURCE_EXTENSIONS = {".mp4", ".mov", ".avi", ".flv", ".mkv", ".webm"}
 CUSTOM_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+CLIP_TIMELINE = declare_component(
+    "moneyprinterturbo_clip_timeline",
+    path=os.path.join(os.path.dirname(__file__), "clip_timeline"),
+)
 _FINAL_VIDEO_PATTERN = re.compile(
     r"^final-(?P<index>\d+)\.(?P<extension>mp4|mov|mkv|webm)$",
     re.IGNORECASE,
@@ -692,12 +697,19 @@ def _prepare_clip_task():
     _add_active_generation_task(task_id, subject=subject)
 
 
+def _bump_clip_timeline_revision():
+    st.session_state["clip_preview_timeline_revision"] = (
+        int(st.session_state.get("clip_preview_timeline_revision", 0)) + 1
+    )
+
+
 def _delete_clip_segment(index: int):
     """Remove a segment from the preview edit list."""
     segments = st.session_state.get("clip_preview_windows", [])
     if 0 <= index < len(segments):
         del segments[index]
         st.session_state["clip_preview_windows"] = list(segments)
+        _bump_clip_timeline_revision()
 
 
 def _add_clip_segment():
@@ -707,6 +719,7 @@ def _add_clip_segment():
     start = max(0.0, total - 15.0)
     segments.append({"start": start, "end": total, "text": ""})
     st.session_state["clip_preview_windows"] = list(segments)
+    _bump_clip_timeline_revision()
 
 
 def _has_clip_source():
@@ -2017,6 +2030,8 @@ def _clear_clip_preview():
         "clip_preview_task_id",
         "clip_preview_subject",
         "clip_preview_total_duration",
+        "clip_preview_waveform",
+        "clip_preview_timeline_revision",
         "clip_preview_running",
     ):
         st.session_state.pop(key, None)
@@ -2078,6 +2093,8 @@ def _render_clip_preview(
         st.session_state["clip_preview_total_duration"] = float(
             result.get("total_duration") or 0
         )
+        st.session_state["clip_preview_waveform"] = result.get("waveform") or []
+        st.session_state["clip_preview_timeline_revision"] = 0
         st.session_state["clip_preview_running"] = False
     except Exception as exc:
         st.session_state["clip_preview_running"] = False
@@ -2087,162 +2104,110 @@ def _render_clip_preview(
         st.error(f"{tr('Preview Clips Failed')}: {exc}")
 
 
-def _clip_player_html(media_url: str, segments: list[dict], labels: dict) -> str:
-    """Build an HTML5 video player with CapCut-like play/zoom/segment-jump."""
-    seg_json = []
-    for seg in segments:
-        seg_json.append(
-            f"{{\"start\": {float(seg.get('start', 0)):.1f}, "
-            f"\"end\": {float(seg.get('end', 0)):.1f}}}"
-        )
-    zoom_in = labels.get("zoom_in", "+")
-    zoom_out = labels.get("zoom_out", "\u2212")
-    zoom_reset = labels.get("zoom_reset", "1:1")
-    jump_label = labels.get("jump", "\u25b6 segment")
-    return f"""
-<div style="font-family: sans-serif; max-width: 100%;">
-  <style>
-    #clipvwrap {{ position: relative; width: 100%; overflow: auto; background: #000; }}
-    #clipv {{ display: block; width: 100%; transform-origin: center top; transition: transform .15s ease; }}
-    .cbtn {{ margin: 2px 4px 2px 0; padding: 3px 10px; cursor: pointer;
-             border: 1px solid #888; border-radius: 4px; background: #fff; }}
-    .zoombar {{ display: flex; align-items: center; gap: 4px; padding: 4px 0; }}
-    .segs {{ display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 0; }}
-    .segb {{ display: inline-block; padding: 2px 8px; border-radius: 4px; cursor: pointer;
-             border: 1px solid #ff4b4b; color: #ff4b4b; background: #fff; font-size: 12px; }}
-    .segb.on {{ background: #ff4b4b; color: #fff; }}
-  </style>
-  <div id="clipvwrap"><video id="clipv" controls preload="metadata"
-         src="{media_url}" style="width:100%"></video></div>
-  <div class="zoombar">
-    <button class="cbtn" onclick="zoomBy(-0.25)">{zoom_out}</button>
-    <button class="cbtn" onclick="zoomBy(0.25)">{zoom_in}</button>
-    <button class="cbtn" onclick="zoomReset()">{zoom_reset}</button>
-    <span id="cliptime" style="margin-left:auto; font-size:12px; color:#666">0:00</span>
-  </div>
-  <div class="segs" id="clipsegs">
-    <button class="segb" onclick="seekTo(0)">&#9654; 0:00</button>
-    {{seg_buttons}}
-  </div>
-  <script>
-    var v = document.getElementById('clipv');
-    var zoom = 1;
-    function zoomBy(d) {{ zoom = Math.min(3, Math.max(0.5, zoom + d)); v.style.transform = 'scale(' + zoom + ')'; }}
-    function zoomReset() {{ zoom = 1; v.style.transform = 'scale(1)'; }}
-    function seekTo(t) {{ if (v) {{ v.currentTime = t; v.play(); }} }}
-    var tm = document.getElementById('cliptime');
-    v.addEventListener('timeupdate', function() {{
-      var m = Math.floor(v.currentTime / 60), s = Math.floor(v.currentTime % 60);
-      tm.textContent = m + ':' + (s < 10 ? '0' : '') + s;
-      var segs = document.querySelectorAll('.segb[data-start]');
-      for (var i = 0; i < segs.length; i++) {{
-        var a = parseFloat(segs[i].getAttribute('data-start'));
-        var b = parseFloat(segs[i].getAttribute('data-end'));
-        segs[i].classList.toggle('on', v.currentTime >= a && v.currentTime <= b);
-      }}
-    }});
-  </script>
-</div>
-""".replace("{{seg_buttons}}", _clip_seg_buttons(segments, jump_label, _fmt_seg_label))
 
-
-def _clip_seg_buttons(segments, jump_label, fmt):
-    parts = []
-    for seg in segments:
-        start = float(seg.get("start", 0))
-        end = float(seg.get("end", 0))
-        parts.append(
-            f'<button class="segb" data-start="{start:.1f}" data-end="{end:.1f}" '
-            f'onclick="seekTo({start:.1f})" title="{jump_label}">'
-            f"{fmt(start, end)}</button>"
-        )
-    return "\n    ".join(parts)
-
-
-def _fmt_seg_label(start: float, end: float) -> str:
-    def ts(value: float) -> str:
-        m = int(value // 60)
-        s = int(value % 60)
-        return f"{m}:{s:02d}"
-
-    return f"{ts(start)}-{ts(end)}"
-
-
-def _render_clip_video_player(source_path: str, segments):
-    """Embed an HTML5 player (play, zoom, jump-to-segment) for the source video."""
-    if not segments or not os.path.isfile(source_path):
-        return
-    media_url = None
+def _clip_media_url(source_path: str) -> str | None:
+    if not os.path.isfile(source_path):
+        return None
     try:
         from streamlit.runtime import get_instance
 
-        media_url = get_instance().media_file_mgr.add(
-            source_path, "video/mp4", coordinates="clip-preview"
+        return get_instance().media_file_mgr.add(
+            source_path,
+            mimetypes.guess_type(source_path)[0] or "video/mp4",
+            coordinates="clip-preview",
         )
     except Exception:
-        logger.debug("media_file_mgr unavailable for clip preview", exc_info=True)
+        logger.debug("media_file_mgr unavailable for clip timeline", exc_info=True)
+        return None
+
+
+def _render_clip_timeline(source_path: str, segments, total_duration, waveform):
+    """Render a small video preview above a zoomable, draggable trim timeline."""
+    media_url = _clip_media_url(source_path)
     if not media_url:
         st.caption(tr("Clip Player Unavailable"))
         return
-    html = _clip_player_html(
-        media_url,
-        segments,
+
+    value = CLIP_TIMELINE(
+        video_url=media_url,
+        duration=float(total_duration or 0),
+        waveform=waveform or [],
+        segments=[
+            {
+                "start": float(segment.get("start", 0)),
+                "end": float(segment.get("end", 0)),
+                "text": str(segment.get("text", "") or ""),
+            }
+            for segment in segments
+        ],
+        revision=int(st.session_state.get("clip_preview_timeline_revision", 0)),
         labels={
-            "zoom_in": tr("Zoom In"),
-            "zoom_out": tr("Zoom Out"),
-            "zoom_reset": tr("Zoom Reset"),
-            "jump": tr("Jump To Segment"),
+            "zoom_in": tr("Timeline Zoom In"),
+            "zoom_out": tr("Timeline Zoom Out"),
+            "fit": tr("Timeline Fit"),
+            "hint": tr("Clip Timeline Help"),
         },
+        default=None,
+        key="clip_timeline_editor",
     )
-    st.iframe(html, height=330, width="stretch")
+    current_revision = int(
+        st.session_state.get("clip_preview_timeline_revision", 0)
+    )
+    if (
+        not isinstance(value, dict)
+        or value.get("revision") != current_revision
+        or not isinstance(value.get("windows"), list)
+    ):
+        return
+
+    edited = []
+    for item in value["windows"]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = max(0.0, float(item.get("start", 0)))
+            end = min(float(total_duration), float(item.get("end", 0)))
+        except (TypeError, ValueError):
+            continue
+        if end > start:
+            edited.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "text": str(item.get("text", "")),
+                }
+            )
+    if edited:
+        st.session_state["clip_preview_windows"] = edited
 
 
 def _render_clip_segment_editor(segments):
-    """Render each segment as trim + delete controls (ranges are committed on rerun)."""
+    """Render the compact video preview and waveform trim editor."""
     total = float(st.session_state.get("clip_preview_total_duration", 0) or 0)
     source = st.session_state.get("clip_preview_source", "") or ""
-    _render_clip_video_player(source, segments)
+    _render_clip_timeline(
+        source,
+        segments,
+        total,
+        st.session_state.get("clip_preview_waveform", []),
+    )
     st.markdown(f"**{tr('Clip Segments')}** ({len(segments)})")
     st.caption(tr("Clip Segments Help"))
     for i, seg in enumerate(segments):
         start = float(seg.get("start", 0))
         end = float(seg.get("end", start + 15))
-        if total > 0:
-            lo = min(max(start, 0.0), total)
-            hi = min(max(end, lo + 1), total)
-            range_key = f"clip_seg_{i}_range"
-            st.session_state.setdefault(
-                range_key, (lo, hi)
+        row = st.columns([1, 5, 1])
+        with row[0]:
+            st.markdown(f"**#{i + 1}**")
+        with row[1]:
+            st.caption(
+                f"{clip_service._fmt_ts(start)} – {clip_service._fmt_ts(end)} · "
+                f"{end - start:.1f}s"
             )
-            seg["start"] = lo
-        editor_row = st.columns([5, 1])
-        with editor_row[0]:
-            if total > 0:
-                st.slider(
-                    f"#{i + 1}",
-                    min_value=0.0,
-                    max_value=total,
-                    step=0.5,
-                    key=range_key,
-                )
-                seg["start"], seg["end"] = (
-                    float(st.session_state[range_key][0]),
-                    float(st.session_state[range_key][1]),
-                )
-            else:
-                cols = st.columns(2)
-                with cols[0]:
-                    seg["start"] = st.number_input(
-                        f"#{i + 1} start (s)", min_value=0.0, value=float(seg.get("start", 0)), step=0.5
-                    )
-                with cols[1]:
-                    seg["end"] = st.number_input(
-                        f"#{i + 1} end (s)", min_value=0.0, value=float(seg.get("end", 0)), step=0.5
-                    )
-            text = str(seg.get("text", "") or "").strip()
+            text = " ".join(str(seg.get("text", "") or "").split())
             if text:
-                st.caption(" ".join(text.split())[:120])
-        with editor_row[1]:
+                st.caption(text[:160])
+        with row[2]:
             st.button(
                 tr("Delete Clip Segment"),
                 key=f"clip_seg_{i}_del",
